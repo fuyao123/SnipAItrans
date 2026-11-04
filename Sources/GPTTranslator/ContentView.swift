@@ -4,6 +4,8 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var viewModel: TranslationViewModel
     @EnvironmentObject private var globalController: GlobalTranslationController
+    @State private var isModelEditorPresented = false
+    @State private var customModelDraft = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,6 +19,7 @@ struct ContentView: View {
         .overlay(alignment: .topLeading) {
             AppleTranslationBridgeHost(service: viewModel.appleService)
         }
+        .onAppear { viewModel.refreshOpenAIModels() }
         .onChange(of: viewModel.sourceText) { _ in
             viewModel.scheduleAutomaticTranslation()
         }
@@ -121,21 +124,122 @@ struct ContentView: View {
                 Divider()
                     .frame(height: 18)
 
+                if viewModel.provider.supportsModelSelection {
+                    modelMenu
+                } else {
+                    Text("此翻译源无需选择模型")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider()
+                    .frame(height: 18)
+
+                if !viewModel.availableReasoningEfforts.isEmpty {
+                    reasoningSlider
+                    Divider().frame(height: 18)
+                }
+
                 if viewModel.isTranslating {
                     ProgressView()
                         .controlSize(.small)
                     Text("正在翻译…")
                         .foregroundStyle(.secondary)
-                } else {
-                    Text("\(viewModel.modelLabel) · 推理\(viewModel.reasoningEffort.displayName) · 停止输入后自动翻译")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
                 }
                 Spacer()
             }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
+    }
+
+    private var modelMenu: some View {
+        HStack(spacing: 6) {
+            Text("模型")
+                .foregroundStyle(.secondary)
+            Menu {
+                if !viewModel.availableModelOptions.contains(viewModel.modelName), !viewModel.modelName.isEmpty {
+                    Button(viewModel.modelName) { viewModel.selectModel(viewModel.modelName) }
+                    Divider()
+                }
+                ForEach(viewModel.availableModelOptions, id: \.self) { model in
+                    Button {
+                        viewModel.selectModel(model)
+                    } label: {
+                        if model == viewModel.modelName {
+                            Label(model, systemImage: "checkmark")
+                        } else {
+                            Text(model)
+                        }
+                    }
+                }
+                Divider()
+                Button("输入模型名称…") {
+                    customModelDraft = viewModel.modelName
+                    isModelEditorPresented = true
+                }
+                if viewModel.provider == .openAIChatGPT || viewModel.provider == .antigravityOAuth {
+                    Button(viewModel.isLoadingModelList ? "正在获取模型…" :
+                           (viewModel.modelListError == nil ? "刷新可用模型" : "刷新失败，点击重试")) {
+                        viewModel.refreshCurrentModelList()
+                    }
+                    .disabled(viewModel.isLoadingModelList)
+                    .help(viewModel.modelListError ?? "重新获取当前账号可用的模型")
+                }
+            } label: {
+                Text(viewModel.modelLabel)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: 210)
+            .help(viewModel.modelListError ?? "选择当前翻译源使用的模型")
+            .popover(isPresented: $isModelEditorPresented) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("模型名称").font(.headline)
+                    TextField("输入模型名称", text: $customModelDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { applyCustomModel() }
+                    HStack {
+                        Spacer()
+                        Button("取消") { isModelEditorPresented = false }
+                        Button("确定") { applyCustomModel() }
+                            .disabled(customModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+                .padding(16)
+                .frame(width: 300)
+            }
+        }
+    }
+
+    private var reasoningSlider: some View {
+        let options = viewModel.availableReasoningEfforts
+        let selected = options.firstIndex(of: viewModel.displayedReasoningEffort) ?? 0
+        return HStack(spacing: 5) {
+            Text("推理").foregroundStyle(.secondary)
+            Slider(value: Binding(
+                get: { Double(selected) },
+                set: { value in
+                    let index = min(max(Int(value.rounded()), 0), options.count - 1)
+                    viewModel.selectReasoningEffort(options[index], retranslate: false)
+                }
+            ), in: 0...Double(max(options.count - 1, 1)), step: 1, onEditingChanged: { editing in
+                if !editing, viewModel.provider != .antigravityOAuth { viewModel.refreshAfterReasoningChange() }
+            })
+            .frame(width: 100)
+            .disabled(options.count < 2)
+            .accessibilityLabel("推理强度")
+            .accessibilityValue(viewModel.displayedReasoningEffort.displayName)
+            Text(viewModel.displayedReasoningEffort.displayName)
+                .font(.caption)
+                .frame(minWidth: 28, alignment: .leading)
+        }
+        .help(viewModel.provider == .antigravityOAuth ? "切换同一模型可用的推理档位" : "调整当前模型的推理强度")
+    }
+
+    private func applyCustomModel() {
+        viewModel.selectModel(customModelDraft)
+        isModelEditorPresented = false
     }
 }
 

@@ -62,14 +62,14 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
-    var supportsModelSelection: Bool { !isMachineTranslation && self != .antigravityOAuth }
+    var supportsModelSelection: Bool { !isMachineTranslation }
 
     var modelOptions: [String] {
         switch self {
         case .openAIChatGPT:
             return ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5"]
         case .antigravityOAuth:
-            return []
+            return [Self.antigravityFastModel]
         case .appleTranslation:
             return []
         case .googleWeb:
@@ -86,7 +86,7 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
     var defaultModel: String {
         switch self {
         case .openAIChatGPT: return Self.openAIDefaultModel
-        case .antigravityOAuth: return ""
+        case .antigravityOAuth: return Self.antigravityFastModel
         case .appleTranslation: return ""
         case .googleWeb: return ""
         case .deepSeek: return "deepseek-v4-flash"
@@ -98,20 +98,26 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
 
 enum ReasoningEffort: String, CaseIterable, Identifiable, Codable, Sendable {
     case none
+    case minimal
     case low
     case medium
     case high
     case xhigh
+    case max
+    case ultra
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
         case .none: return "关闭"
+        case .minimal: return "最低"
         case .low: return "低"
         case .medium: return "中"
         case .high: return "高"
         case .xhigh: return "极高"
+        case .max: return "最大"
+        case .ultra: return "超高"
         }
     }
 

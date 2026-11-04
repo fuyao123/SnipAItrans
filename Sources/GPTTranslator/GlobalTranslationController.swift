@@ -165,6 +165,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     private var quickInputTargetPID: pid_t?
     private var quickInputTranslationTask: Task<Void, Never>?
     private var selectionMouseDownLocation: NSPoint?
+    private var selectionTranslationTask: Task<Void, Never>?
 
     private static let hotKeySignature: OSType = 0x4750_5452 // GPTR
     private static let translateHotKeyID: UInt32 = 1
@@ -190,7 +191,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         translateShortcutModifiers = defaults.string(forKey: "translateShortcutModifiers")
             .flatMap(ShortcutModifiers.init(rawValue:)) ?? .commandShift
         translateShortcutKey = defaults.string(forKey: "translateShortcutKey")
-            .flatMap(ShortcutKey.init(rawValue:)) ?? .t
+            .flatMap(ShortcutKey.init(rawValue:)) ?? .f
         screenshotShortcutModifiers = defaults.string(forKey: "screenshotShortcutModifiers")
             .flatMap(ShortcutModifiers.init(rawValue:)) ?? .commandShift
         screenshotShortcutKey = defaults.string(forKey: "screenshotShortcutKey")
@@ -212,6 +213,26 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         showInDock = defaults.object(forKey: "showInDock") as? Bool ?? true
         launchAtLogin = defaults.object(forKey: "launchAtLogin") as? Bool ?? false
         super.init()
+        if !defaults.bool(forKey: "selectionShortcutDefaultFMigration") {
+            // Move the previous default away from browsers' restore-tab shortcut,
+            // while retaining custom bindings and avoiding an existing use of F.
+            let otherShortcuts = [
+                (screenshotShortcutModifiers, screenshotShortcutKey),
+                (captureShortcutModifiers, captureShortcutKey),
+                (ocrShortcutModifiers, ocrShortcutKey),
+                (quickInputShortcutModifiers, quickInputShortcutKey)
+            ]
+            let newShortcutIsAvailable = !otherShortcuts.contains {
+                $0.0 == .commandShift && $0.1 == .f
+            }
+            if translateShortcutModifiers == .commandShift,
+               translateShortcutKey == .t,
+               newShortcutIsAvailable {
+                translateShortcutKey = .f
+                defaults.set(ShortcutKey.f.rawValue, forKey: "translateShortcutKey")
+            }
+            defaults.set(true, forKey: "selectionShortcutDefaultFMigration")
+        }
     }
 
     func connect(to viewModel: TranslationViewModel) {
@@ -259,6 +280,8 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         mouseMonitor = nil
         localMouseMonitor = nil
         selectionMouseDownLocation = nil
+        selectionTranslationTask?.cancel()
+        selectionTranslationTask = nil
         screenshotKeyMonitor = nil
         screenshotGlobalKeyMonitor = nil
         hideFloatingButton()
@@ -337,7 +360,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 logger.error("translateSelection selectedText=nil-or-empty")
                 showResultWindow(at: location)
                 viewModel?.errorMessage = accessibilityTrusted
-                    ? "没有读取到已选中的文字。请先划词，再按 ⌘⇧T。"
+                    ? "没有读取到已选中的文字。请先选中需要翻译的文字。"
                     : "需要辅助功能权限才能读取其他软件中的选中文字。"
                 return
             }
@@ -1207,9 +1230,11 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] event in
             let eventType = event.type
             let location = NSEvent.mouseLocation
+            let clickCount = event.clickCount
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if eventType == .leftMouseDown {
+                    self.selectionTranslationTask?.cancel()
                     self.selectionMouseDownLocation = location
                     return
                 }
@@ -1221,9 +1246,15 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 // the end of a text selection. In the fallback path below we
                 // synthesize Command-C, which would otherwise close the menu
                 // immediately after it appears.
-                guard !self.isMenuBarLocation(location), !self.isSelectionExcludedInteractionActive() else { return }
+                let excluded = self.isSelectionExcludedInteractionActive()
+                if clickCount >= 2, NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.kingsoft.wpsoffice.mac" {
+                    self.logger.debug("WPS double click drag=\(didDrag, privacy: .public) menu=\(self.isMenuBarLocation(location), privacy: .public) excluded=\(excluded, privacy: .public) appActive=\(NSApp.isActive, privacy: .public)")
+                }
+                guard !self.isMenuBarLocation(location), !excluded else { return }
                 self.dismissUnpinnedResultIfNeeded(at: location)
-                self.handleSelectionMouseUp(allowClipboardFallback: didDrag)
+                let isTextDoubleClick = clickCount >= 2 && self.isTextSelectionLocation(location)
+                guard didDrag || isTextDoubleClick else { return }
+                self.handleSelectionMouseUp(allowClipboardFallback: true, location: location)
             }
         }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
@@ -1291,27 +1322,31 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         }
     }
 
-    private func handleSelectionMouseUp(allowClipboardFallback: Bool) {
-        let location = NSEvent.mouseLocation
+    private func handleSelectionMouseUp(allowClipboardFallback: Bool, location: NSPoint) {
         guard selectionEnabled,
               !NSApp.isActive,
               (showSelectionButton || autoTranslateSelection),
               !isMenuBarLocation(location),
               !isSelectionExcludedInteractionActive() else { return }
-        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder" else {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              application.bundleIdentifier != "com.apple.finder" else {
             hideFloatingButton()
             return
         }
         accessibilityTrusted = AXIsProcessTrusted()
         guard accessibilityTrusted else { return }
-        Task { @MainActor [weak self] in
+        selectionTranslationTask?.cancel()
+        selectionTranslationTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 180_000_000)
             guard let self,
+                  !Task.isCancelled,
                   self.selectionEnabled,
-                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder",
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier,
                   !self.isMenuBarLocation(NSEvent.mouseLocation),
                   !self.isSelectionExcludedInteractionActive(),
                   let text = await self.selectedTextWithClipboardFallback(allowClipboardFallback: allowClipboardFallback),
+                  !Task.isCancelled,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             guard self.viewModel?.shouldTranslateFloatingText(text) != false else {
                 self.hideFloatingButton()
@@ -1324,6 +1359,55 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 self.showFloatingButton(for: text, at: NSEvent.mouseLocation)
             }
         }
+    }
+
+    // WPS draws document text in an AXSplitGroup rather than exposing an
+    // AXTextArea. Accept that document region, but never controls or toolbars:
+    // otherwise double-clicking Save can copy and translate a stale selection.
+    private func isTextSelectionLocation(_ location: NSPoint) -> Bool {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              application.bundleIdentifier != "com.apple.finder",
+              let mainScreen = NSScreen.screens.first else { return false }
+        var hit: AXUIElement?
+        let result = AXUIElementCopyElementAtPosition(
+            AXUIElementCreateSystemWide(), Float(location.x), Float(mainScreen.frame.maxY - location.y), &hit
+        )
+        guard result == .success, let hit else { return false }
+        var hitPID: pid_t = 0
+        guard AXUIElementGetPid(hit, &hitPID) == .success,
+              hitPID == application.processIdentifier else { return false }
+
+        let excluded: Set<String> = ["AXButton", "AXCheckBox", "AXComboBox", "AXDisclosureTriangle",
+                                     "AXLink", "AXMenu", "AXMenuBar", "AXMenuBarItem", "AXMenuButton",
+                                     "AXMenuItem", "AXPopUpButton", "AXRadioButton", "AXScrollBar",
+                                     "AXSlider", "AXTab", "AXToolbar"]
+        let textRoles: Set<String> = ["AXTextArea", "AXTextField", "AXStaticText", "AXWebArea", "AXDocument"]
+        var element: AXUIElement? = hit
+        var isText = false
+        var wpsDocumentSplitCount = 0
+        var isExplicitTextArea = false
+        var roles: [String] = []
+        for _ in 0..<12 {
+            guard let current = element else { break }
+            if let role = accessibilityStringAttribute(kAXRoleAttribute as CFString, from: current) {
+                roles.append(role)
+                if excluded.contains(role) { return false }
+                if textRoles.contains(role) { isText = true }
+                if role == "AXTextArea" { isExplicitTextArea = true }
+                if role == "AXSplitGroup" { wpsDocumentSplitCount += 1 }
+            }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            element = unsafeDowncast(parent, to: AXUIElement.self)
+        }
+        // WPS exposes both its document and its top-level toolbar as split
+        // groups. The Word editor is nested; the Save toolbar is only one
+        // split group below the window and must not trigger copy fallback.
+        let allowed = application.bundleIdentifier == "com.kingsoft.wpsoffice.mac"
+            ? (isExplicitTextArea || wpsDocumentSplitCount >= 2) : isText
+        logger.debug("double-click selection allowed=\(allowed, privacy: .public) roles=\(roles.joined(separator: ","), privacy: .public)")
+        return allowed
     }
 
     private func isMenuBarLocation(_ location: NSPoint) -> Bool {

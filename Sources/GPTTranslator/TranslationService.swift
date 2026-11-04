@@ -29,7 +29,25 @@ struct AntigravityCLIService: Sendable {
 
     func isInstalled() -> Bool { executableURL != nil }
 
-    func warmUp() async {
+    func availableModels() async throws -> [String] {
+        guard let executableURL else { throw ServiceError.notInstalled }
+        let output = await run(executable: executableURL, arguments: ["models"])
+        guard output.status == 0 else {
+            let raw = (output.stderr + "\n" + output.stdout).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw normalizedServiceError(.processFailed(raw.isEmpty ? "无法获取可用模型。" : raw))
+        }
+        let models = output.stdout.split(whereSeparator: \.isNewline).compactMap { line -> String? in
+            let model = String(line.split(separator: "\t", maxSplits: 1).first ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard model.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]*$", options: .regularExpression) != nil else { return nil }
+            return model
+        }
+        guard !models.isEmpty else { throw ServiceError.processFailed("没有获取到可用模型。") }
+        var seen = Set<String>()
+        return models.filter { seen.insert($0).inserted }
+    }
+
+    func warmUp(model: String) async {
         guard let executableURL else { return }
 
         // Starting the stream process alone does not always wake a dormant
@@ -39,6 +57,7 @@ struct AntigravityCLIService: Sendable {
         do {
             _ = try await AntigravityStreamClient.shared.translate(
                 prompt: prompt,
+                model: model,
                 executable: executableURL
             )
         } catch {
@@ -48,18 +67,22 @@ struct AntigravityCLIService: Sendable {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             _ = try? await AntigravityStreamClient.shared.translate(
                 prompt: prompt,
+                model: model,
                 executable: executableURL
             )
         }
     }
 
-    func translate(text: String, source: LanguageOption, target: LanguageOption) async throws -> String {
+    func translate(text: String, source: LanguageOption, target: LanguageOption, model: String) async throws -> String {
         guard let executableURL else { throw ServiceError.notInstalled }
         let prompt = translationPrompt(text: text, source: source, target: target)
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ModelProvider.antigravityFastModel : model.trimmingCharacters(in: .whitespacesAndNewlines)
 
         do {
             return try await AntigravityStreamClient.shared.translate(
                 prompt: prompt,
+                model: model,
                 executable: executableURL
             )
         } catch let serviceError as ServiceError {
@@ -71,7 +94,8 @@ struct AntigravityCLIService: Sendable {
             if shouldRetryWithOneShot(serviceError) {
                 return try await translateOneShot(
                     executable: executableURL,
-                    prompt: prompt
+                    prompt: prompt,
+                    model: model
                 )
             }
             throw normalizedServiceError(serviceError)
@@ -80,7 +104,8 @@ struct AntigravityCLIService: Sendable {
             // provider error is returned directly so we do not send the same request twice.
             return try await translateOneShot(
                 executable: executableURL,
-                prompt: prompt
+                prompt: prompt,
+                model: model
             )
         }
     }
@@ -117,11 +142,11 @@ struct AntigravityCLIService: Sendable {
         """
     }
 
-    private func translateOneShot(executable: URL, prompt: String) async throws -> String {
+    private func translateOneShot(executable: URL, prompt: String, model: String) async throws -> String {
         let output = await run(executable: executable, arguments: [
             "--disable-slash-commands",
-            "--model", ModelProvider.antigravityFastModel,
-            "--output-format", "text", "--effort", "low", "--print-timeout", "45s", "--print=\(prompt)"
+            "--model", model,
+            "--output-format", "text", "--print-timeout", "45s", "--print=\(prompt)"
         ])
         guard output.status == 0 else {
             let raw = (output.stderr + "\n" + output.stdout).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -183,14 +208,15 @@ private final class AntigravityStreamClient: @unchecked Sendable {
     private var readBuffer = Data()
     private var ready = false
     private var executablePath: String?
+    private var currentModel: String?
 
     private init() {}
 
-    func warmUp(executable: URL) async throws {
+    func warmUp(executable: URL, model: String) async throws {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
                 do {
-                    try ensureStarted(executable: executable)
+                    try ensureStarted(executable: executable, model: model)
                     continuation.resume()
                 } catch {
                     stop()
@@ -200,11 +226,11 @@ private final class AntigravityStreamClient: @unchecked Sendable {
         }
     }
 
-    func translate(prompt: String, executable: URL) async throws -> String {
+    func translate(prompt: String, model: String, executable: URL) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
                 do {
-                    let result = try translateSynchronously(prompt: prompt, executable: executable)
+                    let result = try translateSynchronously(prompt: prompt, executable: executable, model: model)
                     continuation.resume(returning: result)
                 } catch {
                     // A provider-level error can leave the persistent CLI in a
@@ -219,8 +245,8 @@ private final class AntigravityStreamClient: @unchecked Sendable {
         }
     }
 
-    private func translateSynchronously(prompt: String, executable: URL) throws -> String {
-        try ensureStarted(executable: executable)
+    private func translateSynchronously(prompt: String, executable: URL, model: String) throws -> String {
+        try ensureStarted(executable: executable, model: model)
         try send([
             "event": "user",
             "message": [
@@ -250,8 +276,8 @@ private final class AntigravityStreamClient: @unchecked Sendable {
         }
     }
 
-    private func ensureStarted(executable: URL) throws {
-        if process?.isRunning == true, executablePath == executable.path {
+    private func ensureStarted(executable: URL, model: String) throws {
+        if process?.isRunning == true, executablePath == executable.path, currentModel == model {
             if !ready { try waitForReady() }
             return
         }
@@ -265,10 +291,9 @@ private final class AntigravityStreamClient: @unchecked Sendable {
         process.executableURL = executable
         process.arguments = [
             "--disable-slash-commands",
-            "--model", ModelProvider.antigravityFastModel,
+            "--model", model,
             "--input-format", "stream-json",
             "--output-format", "stream-json",
-            "--effort", "low",
             "--print-timeout", "45s"
         ]
         process.currentDirectoryURL = FileManager.default.temporaryDirectory
@@ -293,6 +318,7 @@ private final class AntigravityStreamClient: @unchecked Sendable {
         output = outputPipe.fileHandleForReading
         errorOutput = errorPipe.fileHandleForReading
         executablePath = executable.path
+        currentModel = model
         readBuffer.removeAll(keepingCapacity: true)
         ready = false
         try waitForReady()
@@ -335,12 +361,13 @@ private final class AntigravityStreamClient: @unchecked Sendable {
         input?.closeFile()
         output?.closeFile()
         errorOutput?.closeFile()
-        process?.terminate()
+        if process?.isRunning == true { process?.terminate() }
         process = nil
         input = nil
         output = nil
         errorOutput = nil
         executablePath = nil
+        currentModel = nil
         ready = false
         readBuffer.removeAll(keepingCapacity: false)
     }
@@ -390,6 +417,19 @@ struct CodexCLIService: Sendable {
 
     func isInstalled() -> Bool {
         codexURL != nil
+    }
+
+    func availableModels() async throws -> [CodexModelOption] {
+        guard let executable = codexURL else { throw ServiceError.codexNotInstalled }
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    continuation.resume(returning: try CodexModelListClient.fetch(executable: executable))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 
     func loginStatus() async -> Bool {
@@ -529,6 +569,122 @@ struct CodexCLIService: Sendable {
         let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         return ProcessOutput(status: process.terminationStatus, stdout: stdout, stderr: stderr)
+    }
+}
+
+// Use a fresh, short-lived CLI process for every refresh. It does not share the
+// translation queue, so a slow catalog request cannot block an active translation.
+struct CodexModelOption: Sendable {
+    let name: String
+    let supportedEfforts: [ReasoningEffort]
+    let defaultEffort: ReasoningEffort?
+}
+
+private enum CodexModelListClient {
+    static func fetch(executable: URL) throws -> [CodexModelOption] {
+        let process = Process()
+        let input = Pipe(), output = Pipe(), errors = Pipe()
+        process.executableURL = executable
+        process.arguments = [
+            "--disable", "plugins", "--disable", "apps", "--disable", "memories",
+            "--disable", "recommended_plugins", "--disable", "browser_use", "--disable", "computer_use",
+            "app-server", "--stdio", "-c", "mcp_servers={}"
+        ]
+        process.currentDirectoryURL = FileManager.default.temporaryDirectory
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
+        process.environment = environment
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = errors
+        errors.fileHandleForReading.readabilityHandler = { handle in
+            if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+        }
+
+        do { try process.run() } catch {
+            errors.fileHandleForReading.readabilityHandler = nil
+            throw CodexCLIService.ServiceError.processFailed("无法启动 Codex CLI：\(error.localizedDescription)")
+        }
+
+        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 20, execute: timeout)
+        defer {
+            timeout.cancel()
+            errors.fileHandleForReading.readabilityHandler = nil
+            if process.isRunning { process.terminate() }
+            input.fileHandleForWriting.closeFile()
+            output.fileHandleForReading.closeFile()
+            errors.fileHandleForReading.closeFile()
+        }
+
+        var buffer = Data()
+        func send(_ message: [String: Any]) throws {
+            var data = try JSONSerialization.data(withJSONObject: message)
+            data.append(0x0A)
+            try input.fileHandleForWriting.write(contentsOf: data)
+        }
+        func response(id: Int) throws -> [String: Any] {
+            while true {
+                if let newline = buffer.firstIndex(of: 0x0A) {
+                    let line = Data(buffer[..<newline])
+                    buffer.removeSubrange(...newline)
+                    guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                          object["id"] as? Int == id else { continue }
+                    if let error = object["error"] as? [String: Any] {
+                        throw CodexCLIService.ServiceError.processFailed(
+                            (error["message"] as? String) ?? "Codex 模型列表请求失败。"
+                        )
+                    }
+                    return object
+                }
+                let data = output.fileHandleForReading.availableData
+                guard !data.isEmpty else {
+                    throw CodexCLIService.ServiceError.processFailed("Codex 模型列表获取失败或超时，请重试。")
+                }
+                buffer.append(data)
+            }
+        }
+
+        try send([
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": ["clientInfo": ["name": "gpt-translator", "version": "1.0"],
+                       "capabilities": ["experimentalApi": true]]
+        ])
+        _ = try response(id: 1)
+        try send(["jsonrpc": "2.0", "method": "initialized", "params": [:]])
+
+        var models: [CodexModelOption] = []
+        var seenModels = Set<String>()
+        var seenCursors = Set<String>()
+        var cursor: String?
+        var requestID = 2
+        repeat {
+            var params: [String: Any] = ["limit": 100, "includeHidden": false]
+            if let cursor { params["cursor"] = cursor }
+            try send(["jsonrpc": "2.0", "id": requestID, "method": "model/list", "params": params])
+            let message = try response(id: requestID)
+            guard let result = message["result"] as? [String: Any],
+                  let items = result["data"] as? [[String: Any]] else {
+                throw CodexCLIService.ServiceError.processFailed("Codex 返回了无效的模型列表。")
+            }
+            for item in items {
+                guard let name = (item["model"] as? String) ?? (item["id"] as? String),
+                      !name.isEmpty, seenModels.insert(name).inserted else { continue }
+                let entries = item["supportedReasoningEfforts"] as? [[String: Any]] ?? []
+                let efforts = entries.compactMap { ($0["reasoningEffort"] as? String).flatMap(ReasoningEffort.init(rawValue:)) }
+                let defaultEffort = (item["defaultReasoningEffort"] as? String).flatMap(ReasoningEffort.init(rawValue:))
+                models.append(CodexModelOption(name: name, supportedEfforts: efforts, defaultEffort: defaultEffort))
+            }
+            cursor = result["nextCursor"] as? String
+            if let cursor, !seenCursors.insert(cursor).inserted {
+                throw CodexCLIService.ServiceError.processFailed("Codex 模型列表分页异常。")
+            }
+            requestID += 1
+        } while cursor != nil
+        guard !models.isEmpty else {
+            throw CodexCLIService.ServiceError.processFailed("Codex 没有返回可用模型。")
+        }
+        return models
     }
 }
 

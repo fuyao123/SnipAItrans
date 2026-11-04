@@ -44,7 +44,7 @@ struct SettingsView: View {
                             systemImage: viewModel.providerReady ? "checkmark.circle.fill" : "terminal"
                         )
                         .foregroundStyle(viewModel.providerReady ? .green : .secondary)
-                        Text("使用 agy 自己管理的 Google OAuth 登录会话。应用不会读取、复制或打包 OAuth Token；当前固定使用 \(ModelProvider.antigravityFastModel)（低推理）以优先降低翻译延迟。首次使用请先在终端运行 agy 完成 Google 登录。连接测试会发出一次极短请求，并可能受 Google 地区与额度限制。")
+                        Text("使用 agy 自己管理的 Google OAuth 登录会话。应用不会读取、复制或打包 OAuth Token；默认使用 \(ModelProvider.antigravityFastModel)，也可选择账号支持的其他模型。首次使用请先在终端运行 agy 完成 Google 登录。连接测试会发出一次极短请求，并可能受 Google 地区与额度限制。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -99,23 +99,28 @@ struct SettingsView: View {
                     settingsSection("模型与推理") {
                     Picker("预设模型", selection: Binding(
                         get: {
-                            viewModel.provider.modelOptions.contains(viewModel.modelName) ? viewModel.modelName : ""
+                            viewModel.availableModelOptions.contains(viewModel.modelName) ? viewModel.modelName : ""
                         },
                         set: { if !$0.isEmpty { viewModel.modelName = $0 } }
                     )) {
                         Text("自定义模型…").tag("")
-                        ForEach(viewModel.provider.modelOptions, id: \.self) { model in
+                        ForEach(viewModel.availableModelOptions, id: \.self) { model in
                             Text(model).tag(model)
                         }
                     }
                     TextField("模型名称", text: $viewModel.modelName)
                         .textFieldStyle(.roundedBorder)
-                    Picker("推理强度", selection: $viewModel.reasoningEffort) {
-                        ForEach(ReasoningEffort.allCases) { effort in
-                            Text(effort.displayName).tag(effort)
+                    if viewModel.provider != .antigravityOAuth {
+                        Picker("推理强度", selection: Binding(
+                            get: { viewModel.displayedReasoningEffort },
+                            set: { viewModel.selectReasoningEffort($0) }
+                        )) {
+                            ForEach(viewModel.availableReasoningEfforts) { effort in
+                                Text(effort.displayName).tag(effort)
+                            }
                         }
                     }
-                    Text("Codex OAuth、DeepSeek、智谱和自定义兼容 API 会使用所选模型及 reasoning_effort 参数。Antigravity OAuth 使用 agy 当前账号可用的 Gemini 模型。")
+                    Text("Codex OAuth、DeepSeek、智谱和自定义兼容 API 会使用所选模型及推理强度；Antigravity OAuth 使用模型名称对应的推理配置。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

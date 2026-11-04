@@ -132,6 +132,13 @@ final class TranslationViewModel: ObservableObject {
     @Published private(set) var providerConnectionStates: [String: ProviderConnectionState] = [:]
     @Published private(set) var isTestingConnections = false
     @Published private(set) var updateState: AppUpdateState = .idle
+    @Published private(set) var antigravityModels: [String] = []
+    @Published private(set) var isLoadingAntigravityModels = false
+    @Published private(set) var antigravityModelListError: String?
+    @Published private(set) var openAIModels: [String] = []
+    @Published private(set) var openAIModelDetails: [CodexModelOption] = []
+    @Published private(set) var isLoadingOpenAIModels = false
+    @Published private(set) var openAIModelListError: String?
 
     private let codexService: CodexCLIService
     private let antigravityService: AntigravityCLIService
@@ -146,6 +153,7 @@ final class TranslationViewModel: ObservableObject {
     private var comparisonTasks: [Task<Void, Never>] = []
     private var connectionMonitorTask: Task<Void, Never>?
     private var hasStartedAntigravityWarmUp = false
+    private var hasRequestedOpenAIModels = false
     private let updateService = AppUpdateService()
     private var hasCheckedForUpdates = false
 
@@ -218,7 +226,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     var currentAppVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.5"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.6"
     }
 
     func checkForUpdates(force: Bool = false) async {
@@ -233,12 +241,141 @@ final class TranslationViewModel: ObservableObject {
                 ? .available(release)
                 : .upToDate
         } catch {
+            hasCheckedForUpdates = false
             updateState = .failed(error.localizedDescription)
         }
     }
 
     var modelLabel: String {
         modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "默认模型" : modelName
+    }
+
+    var availableModelOptions: [String] {
+        switch provider {
+        case .openAIChatGPT where !openAIModels.isEmpty: return openAIModels
+        case .antigravityOAuth where !antigravityModels.isEmpty: return antigravityModels
+        default: return provider.modelOptions
+        }
+    }
+
+    var availableReasoningEfforts: [ReasoningEffort] {
+        if provider == .openAIChatGPT {
+            if let model = openAIModelDetails.first(where: { $0.name == modelName }), !model.supportedEfforts.isEmpty {
+                return model.supportedEfforts
+            }
+            return [.none, .low, .medium, .high, .xhigh]
+        }
+        if provider == .antigravityOAuth {
+            let suffixes: [(String, ReasoningEffort)] = [("low", .low), ("medium", .medium), ("high", .high)]
+            guard let suffix = suffixes.first(where: { modelName.hasSuffix("-" + $0.0) })?.0 else { return [] }
+            let base = String(modelName.dropLast(suffix.count + 1))
+            return suffixes.compactMap { availableModelOptions.contains(base + "-" + $0.0) ? $0.1 : nil }
+        }
+        if provider.isMachineTranslation { return [] }
+        return [.none, .low, .medium, .high, .xhigh]
+    }
+
+    var displayedReasoningEffort: ReasoningEffort {
+        if provider == .antigravityOAuth {
+            return [.low, .medium, .high].first(where: { modelName.hasSuffix("-" + $0.rawValue) }) ?? .none
+        }
+        return reasoningEffort
+    }
+
+    func selectReasoningEffort(_ effort: ReasoningEffort, retranslate: Bool = true) {
+        guard availableReasoningEfforts.contains(effort) else { return }
+        if provider == .antigravityOAuth {
+            guard let lastDash = modelName.lastIndex(of: "-") else { return }
+            selectModel(String(modelName[..<lastDash]) + "-" + effort.rawValue)
+            return
+        }
+        guard reasoningEffort != effort else { return }
+        reasoningEffort = effort
+        UserDefaults.standard.set(effort.rawValue, forKey: "reasoningEffort")
+        if retranslate { refreshAfterReasoningChange() }
+    }
+
+    func refreshAfterReasoningChange() {
+        lastSubmittedText = ""
+        translatedText = ""
+        errorMessage = nil
+        scheduleAutomaticTranslation(delayNanoseconds: 100_000_000)
+    }
+
+    private func reconcileOpenAIReasoning() {
+        guard provider == .openAIChatGPT,
+              let model = openAIModelDetails.first(where: { $0.name == modelName }),
+              !model.supportedEfforts.isEmpty, !model.supportedEfforts.contains(reasoningEffort) else { return }
+        reasoningEffort = model.defaultEffort.flatMap { model.supportedEfforts.contains($0) ? $0 : nil } ?? model.supportedEfforts[0]
+        UserDefaults.standard.set(reasoningEffort.rawValue, forKey: "reasoningEffort")
+    }
+
+    var modelListError: String? {
+        switch provider {
+        case .openAIChatGPT: return openAIModelListError
+        case .antigravityOAuth: return antigravityModelListError
+        default: return nil
+        }
+    }
+
+    var isLoadingModelList: Bool {
+        switch provider {
+        case .openAIChatGPT: return isLoadingOpenAIModels
+        case .antigravityOAuth: return isLoadingAntigravityModels
+        default: return false
+        }
+    }
+
+    func refreshCurrentModelList() {
+        switch provider {
+        case .openAIChatGPT: refreshOpenAIModels()
+        case .antigravityOAuth: refreshAntigravityModels()
+        default: break
+        }
+    }
+
+    func refreshOpenAIModels() {
+        guard !isLoadingOpenAIModels else { return }
+        hasRequestedOpenAIModels = true
+        isLoadingOpenAIModels = true
+        openAIModelListError = nil
+        Task {
+            do {
+                let models = try await codexService.availableModels()
+                openAIModelDetails = models
+                openAIModels = models.map(\.name)
+                reconcileOpenAIReasoning()
+            } catch {
+                openAIModelListError = error.localizedDescription
+            }
+            isLoadingOpenAIModels = false
+        }
+    }
+
+    func selectModel(_ model: String) {
+        let selected = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selected.isEmpty, selected != modelName else { return }
+        modelName = selected
+        reconcileOpenAIReasoning()
+        persistSettings()
+        translatedText = ""
+        errorMessage = nil
+        lastSubmittedText = ""
+        scheduleAutomaticTranslation(delayNanoseconds: 100_000_000)
+    }
+
+    func refreshAntigravityModels() {
+        guard !isLoadingAntigravityModels else { return }
+        isLoadingAntigravityModels = true
+        antigravityModelListError = nil
+        Task {
+            do {
+                antigravityModels = try await antigravityService.availableModels()
+            } catch {
+                antigravityModelListError = error.localizedDescription
+            }
+            isLoadingAntigravityModels = false
+        }
     }
 
     var providerReady: Bool {
@@ -353,6 +490,7 @@ final class TranslationViewModel: ObservableObject {
                 ? (keychain.readAPIKey(for: newProvider) ?? "")
                 : ""
         }
+        reconcileOpenAIReasoning()
         errorMessage = nil
         refreshLoginStatus()
         translatedText = ""
@@ -384,6 +522,7 @@ final class TranslationViewModel: ObservableObject {
                 : ""
         }
 
+        reconcileOpenAIReasoning()
         errorMessage = nil
         translatedText = ""
         lastSubmittedText = ""
@@ -437,12 +576,17 @@ final class TranslationViewModel: ObservableObject {
     }
 
     func refreshLoginStatus() {
+        if !hasRequestedOpenAIModels { refreshOpenAIModels() }
         let shouldWarmAntigravity = provider == .antigravityOAuth
             || floatingSourceIDs.contains(ModelProvider.antigravityOAuth.rawValue)
         let startAntigravityWarmUp = shouldWarmAntigravity && !hasStartedAntigravityWarmUp
         if startAntigravityWarmUp {
             hasStartedAntigravityWarmUp = true
         }
+        if provider == .antigravityOAuth, antigravityModels.isEmpty, antigravityModelListError == nil {
+            refreshAntigravityModels()
+        }
+        let antigravityModel = provider == .antigravityOAuth ? modelName : Self.savedModel(for: .antigravityOAuth)
 
         Task {
             isLoggedIn = await codexService.loginStatus()
@@ -450,7 +594,7 @@ final class TranslationViewModel: ObservableObject {
                 await codexService.warmUp(model: modelName, reasoning: reasoningEffort)
             }
             if startAntigravityWarmUp {
-                await antigravityService.warmUp()
+                await antigravityService.warmUp(model: antigravityModel)
             }
         }
     }
@@ -463,6 +607,7 @@ final class TranslationViewModel: ObservableObject {
             do {
                 try await codexService.login()
                 isLoggedIn = await codexService.loginStatus()
+                if isLoggedIn { refreshOpenAIModels() }
                 if !isLoggedIn { errorMessage = "登录流程未完成，请重试。" }
             } catch {
                 errorMessage = error.localizedDescription
@@ -488,6 +633,7 @@ final class TranslationViewModel: ObservableObject {
         let source = sourceLanguage
         let target = targetLanguage
         let selectedProvider = provider
+        let selectedSourceID = activeSourceID
         let model = modelName
         let reasoning = reasoningEffort
         let key = apiKey
@@ -511,7 +657,7 @@ final class TranslationViewModel: ObservableObject {
                         reasoning: reasoning
                     )
                 } else if selectedProvider == .antigravityOAuth {
-                    result = try await antigravityService.translate(text: text, source: source, target: target)
+                    result = try await antigravityService.translate(text: text, source: source, target: target, model: model)
                 } else if selectedProvider == .appleTranslation {
                     result = try await appleService.translate(
                         text: text,
@@ -531,12 +677,14 @@ final class TranslationViewModel: ObservableObject {
                         customEndpoint: customAPIEndpoint
                     )
                 }
-                if sourceText == text {
+                if sourceText == text, activeSourceID == selectedSourceID, modelName == model, reasoningEffort == reasoning,
+                   sourceLanguage == source, targetLanguage == target {
                     translatedText = result
                     storeInCache(result, for: cacheKey)
                 }
             } catch {
-                if sourceText == text {
+                if sourceText == text, activeSourceID == selectedSourceID, modelName == model, reasoningEffort == reasoning,
+                   sourceLanguage == source, targetLanguage == target {
                     errorMessage = error.localizedDescription
                 }
                 if case CodexCLIService.ServiceError.notLoggedIn = error {
@@ -544,7 +692,7 @@ final class TranslationViewModel: ObservableObject {
                 }
             }
             isTranslating = false
-            if pendingAutomaticTranslation || sourceText != text {
+            if pendingAutomaticTranslation || sourceText != text || activeSourceID != selectedSourceID || modelName != model || reasoningEffort != reasoning {
                 pendingAutomaticTranslation = false
                 scheduleAutomaticTranslation(delayNanoseconds: 150_000_000)
             }
@@ -652,7 +800,7 @@ final class TranslationViewModel: ObservableObject {
                             reasoning: reasoning
                         )
                     } else if selectedProvider == .antigravityOAuth {
-                        result = try await antigravityService.translate(text: text, source: source, target: target)
+                        result = try await antigravityService.translate(text: text, source: source, target: target, model: model)
                     } else if selectedProvider == .appleTranslation {
                         result = try await appleService.translate(
                             text: text,
@@ -740,7 +888,7 @@ final class TranslationViewModel: ObservableObject {
         }
 
         if selectedProvider == .antigravityOAuth {
-            return try await antigravityService.translate(text: text, source: source, target: target)
+            return try await antigravityService.translate(text: text, source: source, target: target, model: selectedModel)
         }
 
         if selectedProvider == .appleTranslation {
@@ -970,7 +1118,8 @@ final class TranslationViewModel: ObservableObject {
             _ = try await antigravityService.translate(
                 text: testText,
                 source: sourceLanguage,
-                target: target
+                target: target,
+                model: model
             )
         } else if provider == .appleTranslation {
             try await appleService.testInstalledPair(
@@ -1004,10 +1153,13 @@ final class TranslationViewModel: ObservableObject {
         // Migrate the previous OpenAI translation default to the current fast model.
         // An empty value means “use the default model” in the settings UI.
         if provider == .openAIChatGPT,
-           trimmed.isEmpty || trimmed == "gpt-5.6-luna" {
-            let model = provider.defaultModel
-            UserDefaults.standard.set(model, forKey: modelKey(for: provider))
-            return model
+           !UserDefaults.standard.bool(forKey: "openAIModelDefaultMigrationCompleted") {
+            UserDefaults.standard.set(true, forKey: "openAIModelDefaultMigrationCompleted")
+            if trimmed.isEmpty || trimmed == "gpt-5.6-luna" {
+                let model = provider.defaultModel
+                UserDefaults.standard.set(model, forKey: modelKey(for: provider))
+                return model
+            }
         }
         return trimmed.isEmpty ? provider.defaultModel : trimmed
     }
