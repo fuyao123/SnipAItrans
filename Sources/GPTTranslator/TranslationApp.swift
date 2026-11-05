@@ -6,7 +6,7 @@ struct TranslationApp: App {
     @StateObject private var globalController = GlobalTranslationController()
 
     var body: some Scene {
-        WindowGroup("GPT 翻译助手", id: "main") {
+        WindowGroup(AppIdentity.name, id: "main") {
             ContentView()
                 .environmentObject(viewModel)
                 .environmentObject(globalController)
@@ -56,7 +56,7 @@ private struct MenuBarTranslationIcon: View {
         }
         .frame(width: 20, height: 17)
         .id(selectionEnabled)
-        .accessibilityLabel(selectionEnabled ? "AI 翻译助手，划词翻译已开启" : "AI 翻译助手，划词翻译已关闭")
+        .accessibilityLabel(selectionEnabled ? "\(AppIdentity.name)，划词翻译已开启" : "\(AppIdentity.name)，划词翻译已关闭")
     }
 
     private func renderedIcon(enabled: Bool) -> NSImage? {

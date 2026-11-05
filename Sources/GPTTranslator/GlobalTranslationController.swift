@@ -892,7 +892,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 hasRequestedScreenCapturePermission = true
                 _ = CGRequestScreenCaptureAccess()
             }
-            viewModel?.errorMessage = "需要屏幕录制权限。请在系统设置中允许 GPT 翻译助手；首次授权后可能需要重新启动应用。"
+            viewModel?.errorMessage = "需要屏幕录制权限。请在系统设置中允许 \(AppIdentity.name)；首次授权后可能需要重新启动应用。"
             return nil
         }
         guard let image = CGDisplayCreateImage(CGMainDisplayID()) else {
@@ -1731,7 +1731,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         // Keep its main window hidden while the capture overlay is active so
         // dismissing the overlay with Escape cannot reveal it underneath.
         NSApp.windows
-            .filter { $0.canBecomeMain && $0.title == "GPT 翻译助手" }
+            .filter { $0.canBecomeMain && $0.title == AppIdentity.name }
             .forEach { $0.orderOut(nil) }
 
         return await withCheckedContinuation { continuation in

@@ -37,7 +37,7 @@ struct ContentView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 30, height: 30)
-            Text("GPT 翻译助手")
+            Text(AppIdentity.name)
                 .font(.title2.weight(.semibold))
             Spacer()
             Button {
@@ -118,7 +118,7 @@ struct ContentView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .fixedSize()
+                .frame(minWidth: 120, idealWidth: 210, maxWidth: 250, alignment: .leading)
                 .help("选择并保存主窗口的默认翻译源")
 
                 Divider()
@@ -174,11 +174,13 @@ struct ContentView: View {
                     }
                 }
                 Divider()
-                Button("输入模型名称…") {
-                    customModelDraft = viewModel.modelName
-                    isModelEditorPresented = true
+                if !viewModel.provider.needsAPIKey || viewModel.modelListError != nil {
+                    Button("输入模型名称…") {
+                        customModelDraft = viewModel.modelName
+                        isModelEditorPresented = true
+                    }
                 }
-                if viewModel.provider == .openAIChatGPT || viewModel.provider == .antigravityOAuth {
+                if viewModel.provider.supportsModelSelection {
                     Button(viewModel.isLoadingModelList ? "正在获取模型…" :
                            (viewModel.modelListError == nil ? "刷新可用模型" : "刷新失败，点击重试")) {
                         viewModel.refreshCurrentModelList()

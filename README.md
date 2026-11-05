@@ -1,6 +1,8 @@
-# GPT 翻译助手
+# SnipAItrans
 
-一个原生 macOS SwiftUI 翻译软件：常驻菜单栏，使用 ChatGPT OAuth 登录的本机 Codex CLI 会话进行翻译，并支持跨应用划词、截图和 OCR。
+一个原生 macOS 翻译与截图工具：常驻菜单栏，支持多种 AI 与离线翻译源，以及跨应用划词、截图标注和 OCR。
+
+SnipAItrans 原名“GPT 翻译助手”，从 1.3.0 开始使用新名称。
 
 ## 产品构想
 
@@ -9,7 +11,7 @@
 ## 功能
 
 - 菜单栏翻译图标
-- 主窗口可直接切换翻译源和模型；OpenAI 和 Antigravity OAuth 可读取并刷新当前账号支持的模型列表
+- 主窗口可直接切换翻译源和模型；OAuth 及支持模型列表接口的 API 源可读取并刷新模型列表
 - 主窗口可通过滑块调整推理强度，提供所选模型支持的档位
 - 自动识别原文语言，支持中文、英语、日语、韩语、西班牙语、法语和德语
 - 按 `⌘⇧F` 启用或关闭划词翻译，避免与浏览器恢复关闭标签页的快捷键冲突
@@ -36,13 +38,14 @@
 - 菜单栏显示所有已开启来源的连接状态，启动时检测，之后每小时检测，也可手动刷新
 - 启动时自动检查 GitHub 正式版本，菜单栏右下角提示并可打开新版下载页
 - 每个第三方服务和自定义配置的 API Key 独立保存在 macOS 钥匙串
+- DeepSeek、智谱和支持 OpenAI 兼容模型列表接口的自定义 API 在配置 Key 后自动获取模型；勾选的模型可作为独立翻译源，按需用于主窗口和悬浮窗。接口不可用时也可手动添加模型
 - 可选择预设或自定义模型，并按模型支持情况调整推理强度
 - 可在菜单栏决定是否翻译中文内容，并可选择是否在 Dock 中显示应用
 - 设置中支持隐藏 Dock 图标，并可选择登录 macOS 时自动启动
 
 ## 运行
 
-需要 macOS 13 或更高版本和 Swift 6 / Xcode Command Line Tools。若使用 OpenAI/ChatGPT OAuth 翻译源，需要自行安装 Codex CLI 并完成 `codex login`；若使用 Gemini/Google OAuth 翻译源，需要自行安装 Antigravity CLI（`agy`）并完成 Google 登录。
+需要 macOS 13 或更高版本和 Swift 6 / Xcode Command Line Tools。当前提供的 DMG 适用于 Apple Silicon（arm64）Mac。若使用 OpenAI/ChatGPT OAuth 翻译源，需要自行安装 Codex CLI 并完成 `codex login`；若使用 Gemini/Google OAuth 翻译源，需要自行安装 Antigravity CLI（`agy`）并完成 Google 登录。
 
 ```bash
 swift run
@@ -53,16 +56,18 @@ swift run
 ```bash
 chmod +x scripts/build-app.sh
 ./scripts/build-app.sh
-open "$HOME/Applications/GPT翻译助手.app"
+open "$HOME/Applications/SnipAItrans.app"
 ```
 
-构建脚本会把唯一的应用副本安装到 `~/Applications/GPT翻译助手.app`。首次划词翻译需要在“系统设置 → 隐私与安全性 → 辅助功能”中允许这一份应用；首次截图时需要允许屏幕录制。
+构建脚本会将应用安装到 `~/Applications/SnipAItrans.app`。首次划词翻译需要在“系统设置 → 隐私与安全性 → 辅助功能”中允许这一份应用；首次截图时需要允许屏幕录制。
 
 应用图标采用自制蓝紫渐变双气泡设计；许可说明见 `THIRD_PARTY_NOTICES.md`。菜单栏图标为适配浅色和深色菜单栏的单色环形翻译标识。
 
 ## DMG 安装
 
-从 GitHub Releases 下载 `GPT-Translator-1.2.6-macOS.dmg`，打开后把“GPT 翻译助手”拖入 Applications。当前公开构建未使用 Apple Developer ID 公证；macOS 首次打开时可能需要在 Finder 中右键应用并选择“打开”。
+从 [GitHub Releases](https://github.com/fuyao123/SnipAItrans/releases) 下载 `SnipAItrans-1.3.0-macOS.dmg`，打开后将 `SnipAItrans` 拖入 Applications。当前公开构建未使用 Apple Developer ID 公证；macOS 首次打开时可能需要在 Finder 中右键应用并选择“打开”。
+
+从 1.2.6 或更早版本升级时，请先退出旧版并手动下载新版：仓库更名后，旧版的自动更新检查可能无法识别新地址。新版沿用原来的应用标识和钥匙串服务，以保留设置和凭据；如系统要求重新授权，请在系统设置或应用设置中完成授权。
 
 ## 隐私与凭据
 

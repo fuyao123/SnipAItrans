@@ -5,6 +5,8 @@ struct SettingsView: View {
     @EnvironmentObject private var viewModel: TranslationViewModel
     @EnvironmentObject private var globalController: GlobalTranslationController
     @State private var automaticSaveTask: Task<Void, Never>?
+    @State private var manualModelDraft = ""
+    @State private var modelSearch = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -82,7 +84,10 @@ struct SettingsView: View {
                             TextField("接口地址，例如 https://example.com/v1/chat/completions", text: $viewModel.customAPIEndpoint)
                                 .textFieldStyle(.roundedBorder)
                         }
-                        SecureField("\(viewModel.provider.shortName) API Key", text: $viewModel.apiKey)
+                        SecureField("\(viewModel.provider.shortName) API Key", text: Binding(
+                            get: { viewModel.apiKey },
+                            set: { viewModel.setAPIKeyFromUser($0) }
+                        ))
                             .textFieldStyle(.roundedBorder)
                         Button("重新授权钥匙串读取", systemImage: "key") {
                             viewModel.authorizeSelectedAPIKeyFromKeychain()
@@ -97,19 +102,86 @@ struct SettingsView: View {
 
                 if viewModel.provider.supportsModelSelection {
                     settingsSection("模型与推理") {
-                    Picker("预设模型", selection: Binding(
-                        get: {
-                            viewModel.availableModelOptions.contains(viewModel.modelName) ? viewModel.modelName : ""
-                        },
-                        set: { if !$0.isEmpty { viewModel.modelName = $0 } }
+                    HStack {
+                    Picker("当前模型", selection: Binding(
+                        get: { viewModel.modelName },
+                        set: { if !$0.isEmpty { viewModel.selectModel($0) } }
                     )) {
-                        Text("自定义模型…").tag("")
+                        if !viewModel.availableModelOptions.contains(viewModel.modelName) {
+                            Text(viewModel.modelName.isEmpty ? "请选择模型" : viewModel.modelName).tag(viewModel.modelName)
+                        }
                         ForEach(viewModel.availableModelOptions, id: \.self) { model in
                             Text(model).tag(model)
                         }
                     }
-                    TextField("模型名称", text: $viewModel.modelName)
-                        .textFieldStyle(.roundedBorder)
+                    Button(viewModel.isLoadingModelList ? "获取中…" : "刷新模型") {
+                        viewModel.refreshCurrentModelList()
+                    }
+                    .disabled(viewModel.isLoadingModelList)
+                    }
+                    if let error = viewModel.modelListError {
+                        Label(error, systemImage: "exclamationmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if viewModel.provider.needsAPIKey {
+                        Text(viewModel.apiModelsBySource[viewModel.activeBaseSourceID].map { "已获取 \($0.count) 个模型。" }
+                             ?? "填写 API Key 后自动获取模型。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if viewModel.provider.needsAPIKey {
+                        if !viewModel.apiModelChoices.isEmpty {
+                            Text("选择要加入翻译源的模型").font(.subheadline.weight(.medium))
+                            if viewModel.apiModelChoices.count > 8 {
+                                TextField("搜索模型", text: $modelSearch)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 7) {
+                                    ForEach(viewModel.apiModelChoices.filter {
+                                        modelSearch.isEmpty || $0.localizedCaseInsensitiveContains(modelSearch)
+                                    }, id: \.self) { model in
+                                        Toggle(isOn: Binding(
+                                            get: { viewModel.isAPIModelAdded(model) },
+                                            set: { viewModel.setAPIModelAdded(model, enabled: $0) }
+                                        )) {
+                                            HStack {
+                                                Text(model)
+                                                if let fetched = viewModel.apiModelsBySource[viewModel.activeBaseSourceID], !fetched.contains(model) {
+                                                    Text("当前列表未返回")
+                                                        .font(.caption)
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(6)
+                            }
+                            .frame(maxHeight: 150)
+                            Text("勾选后可在主窗口选择；如需划词时同时显示，请在下方“悬浮窗结果来源”中启用。多个模型会分别请求接口，可能产生额外费用。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if viewModel.modelListError != nil {
+                            HStack {
+                                TextField("无法获取列表时，手动输入模型名称", text: $manualModelDraft)
+                                    .textFieldStyle(.roundedBorder)
+                                Button("加入翻译源") {
+                                    viewModel.setAPIModelAdded(manualModelDraft, enabled: true)
+                                    manualModelDraft = ""
+                                }
+                                .disabled(manualModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            }
+                        }
+                    } else {
+                        TextField("模型名称", text: $viewModel.modelName)
+                            .textFieldStyle(.roundedBorder)
+                    }
                     if viewModel.provider != .antigravityOAuth {
                         Picker("推理强度", selection: Binding(
                             get: { viewModel.displayedReasoningEffort },
@@ -246,6 +318,12 @@ struct SettingsView: View {
             saveImmediately()
         }
         .onChange(of: automaticSaveSnapshot) { _ in scheduleAutomaticSave() }
+        .onChange(of: viewModel.apiKey) { _ in viewModel.scheduleAPIModelRefresh() }
+        .onChange(of: viewModel.customAPIEndpoint) { _ in viewModel.scheduleAPIModelRefresh() }
+        .onChange(of: viewModel.activeBaseSourceID) { _ in
+            modelSearch = ""
+            manualModelDraft = ""
+        }
     }
 
     private var credentialHelp: String {
@@ -278,6 +356,7 @@ struct SettingsView: View {
             customAPIEndpoint: viewModel.customAPIEndpoint,
             customAPIDisplayName: viewModel.customAPIDisplayName,
             selectedCustomAPIID: viewModel.selectedCustomAPIID,
+            selectedAPIModelSourceID: viewModel.selectedAPIModelSourceID,
             translateEnglishSelectionToChinese: viewModel.translateEnglishSelectionToChinese,
             floatingSourceIDs: viewModel.floatingSourceIDs,
             selectionEnabled: globalController.selectionEnabled,
@@ -348,6 +427,7 @@ private struct AutomaticSaveSnapshot: Equatable {
     let customAPIEndpoint: String
     let customAPIDisplayName: String
     let selectedCustomAPIID: UUID?
+    let selectedAPIModelSourceID: UUID?
     let translateEnglishSelectionToChinese: Bool
     let floatingSourceIDs: Set<String>
     let selectionEnabled: Bool

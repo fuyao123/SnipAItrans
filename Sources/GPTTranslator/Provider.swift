@@ -75,7 +75,7 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .googleWeb:
             return []
         case .deepSeek:
-            return ["deepseek-v4-flash", "deepseek-v4-pro"]
+            return ["deepseek-flash", "deepseek-v4-pro"]
         case .zhipu:
             return ["glm-5.3-flash", "glm-5-turbo", "glm-5.3", "glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.6", "glm-4.5-air", "glm-4.5"]
         case .customAPI:
@@ -89,7 +89,7 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .antigravityOAuth: return Self.antigravityFastModel
         case .appleTranslation: return ""
         case .googleWeb: return ""
-        case .deepSeek: return "deepseek-v4-flash"
+        case .deepSeek: return "deepseek-flash"
         case .zhipu: return "glm-5.3-flash"
         case .customAPI: return ""
         }

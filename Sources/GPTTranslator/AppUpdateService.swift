@@ -41,10 +41,10 @@ struct AppUpdateService: Sendable {
     }
 
     private let latestReleaseAPIURL = URL(
-        string: "https://api.github.com/repos/fuyao123/GPT-Translator/releases/latest"
+        string: "https://api.github.com/repos/fuyao123/SnipAItrans/releases/latest"
     )!
     private let latestReleaseURL = URL(
-        string: "https://github.com/fuyao123/GPT-Translator/releases/latest"
+        string: "https://github.com/fuyao123/SnipAItrans/releases/latest"
     )!
 
     func latestRelease() async throws -> AppRelease {
@@ -85,7 +85,7 @@ struct AppUpdateService: Sendable {
     private func updateRequest(url: URL) -> URLRequest {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
         request.timeoutInterval = 15
-        request.setValue("GPT-Translator", forHTTPHeaderField: "User-Agent")
+        request.setValue(AppIdentity.name, forHTTPHeaderField: "User-Agent")
         return request
     }
 
@@ -101,7 +101,8 @@ struct AppUpdateService: Sendable {
         guard version.range(of: "^[0-9]+(\\.[0-9]+)*$", options: .regularExpression) != nil,
               pageURL.scheme == "https",
               pageURL.host == "github.com",
-              pageURL.path.hasPrefix("/fuyao123/GPT-Translator/releases/tag/") else {
+              ["/fuyao123/SnipAItrans/releases/tag/", "/fuyao123/GPT-Translator/releases/tag/"]
+                .contains(where: { pageURL.path.hasPrefix($0) }) else {
             throw UpdateError.invalidRelease
         }
         return AppRelease(version: version, pageURL: pageURL)

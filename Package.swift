@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "GPTTranslator",
+    name: "SnipAItrans",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "GPTTranslator", targets: ["GPTTranslator"])
+        .executable(name: "SnipAItrans", targets: ["GPTTranslator"])
     ],
     targets: [
         .executableTarget(

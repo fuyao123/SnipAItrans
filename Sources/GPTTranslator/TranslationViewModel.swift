@@ -81,8 +81,29 @@ struct TranslationSource: Identifiable, Hashable, Sendable {
     let provider: ModelProvider
     let customAPIID: UUID?
     let displayName: String
+    var modelOverride: String? = nil
+    var apiModelID: UUID? = nil
 
     var shortName: String { displayName }
+}
+
+struct APIModelSource: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    let provider: ModelProvider
+    let customAPIID: UUID?
+    let model: String
+
+    init(id: UUID = UUID(), provider: ModelProvider, customAPIID: UUID?, model: String) {
+        self.id = id
+        self.provider = provider
+        self.customAPIID = customAPIID
+        self.model = model
+    }
+
+    var sourceID: String { "api-model.\(id.uuidString)" }
+    var baseSourceID: String {
+        customAPIID.map { "custom.\($0.uuidString)" } ?? provider.rawValue
+    }
 }
 
 struct ComparisonTranslationResult: Identifiable, Sendable {
@@ -123,6 +144,8 @@ final class TranslationViewModel: ObservableObject {
     @Published var customAPIDisplayName: String
     @Published private(set) var customAPISources: [CustomAPISource]
     @Published var selectedCustomAPIID: UUID?
+    @Published private(set) var apiModelSources: [APIModelSource]
+    @Published private(set) var selectedAPIModelSourceID: UUID?
     @Published var translateChineseContent: Bool
     @Published var translateEnglishSelectionToChinese: Bool
     @Published var resultFontSize: CGFloat
@@ -139,10 +162,14 @@ final class TranslationViewModel: ObservableObject {
     @Published private(set) var openAIModelDetails: [CodexModelOption] = []
     @Published private(set) var isLoadingOpenAIModels = false
     @Published private(set) var openAIModelListError: String?
+    @Published private(set) var apiModelsBySource: [String: [String]] = [:]
+    @Published private(set) var apiModelErrorsBySource: [String: String] = [:]
+    @Published private(set) var loadingAPIModelSources: Set<String> = []
 
     private let codexService: CodexCLIService
     private let antigravityService: AntigravityCLIService
     private let directService: DirectProviderService
+    private let apiModelCatalog: APIModelCatalog
     let appleService: AppleTranslationService
     private let keychain: KeychainStore
     private var automaticTranslationTask: Task<Void, Never>?
@@ -154,6 +181,15 @@ final class TranslationViewModel: ObservableObject {
     private var connectionMonitorTask: Task<Void, Never>?
     private var hasStartedAntigravityWarmUp = false
     private var hasRequestedOpenAIModels = false
+    private struct APIModelRequest: Equatable {
+        let sourceID: String
+        let endpoint: String
+        let apiKey: String
+    }
+    private var apiModelRequests: [String: APIModelRequest] = [:]
+    private var apiModelTasks: [String: Task<Void, Never>] = [:]
+    private var apiModelDebounceTask: Task<Void, Never>?
+    private var apiKeyWasEdited = false
     private let updateService = AppUpdateService()
     private var hasCheckedForUpdates = false
 
@@ -161,12 +197,14 @@ final class TranslationViewModel: ObservableObject {
         codexService: CodexCLIService = CodexCLIService(),
         antigravityService: AntigravityCLIService = AntigravityCLIService(),
         directService: DirectProviderService = DirectProviderService(),
+        apiModelCatalog: APIModelCatalog = APIModelCatalog(),
         appleService: AppleTranslationService = AppleTranslationService(),
         keychain: KeychainStore = KeychainStore()
     ) {
         self.codexService = codexService
         self.antigravityService = antigravityService
         self.directService = directService
+        self.apiModelCatalog = apiModelCatalog
         self.appleService = appleService
         self.keychain = keychain
 
@@ -186,11 +224,24 @@ final class TranslationViewModel: ObservableObject {
         self.selectedCustomAPIID = initialCustom.id
         self.customAPIDisplayName = initialCustom.displayName
         self.customAPIEndpoint = initialCustom.endpoint
+        let savedAPIModels = UserDefaults.standard.data(forKey: "apiModelSources")
+            .flatMap { try? JSONDecoder().decode([APIModelSource].self, from: $0) } ?? []
+        let initialAPIModels = savedAPIModels.filter { source in
+            source.provider.needsAPIKey && !source.model.isEmpty &&
+                (source.provider != .customAPI || initialCustomSources.contains { $0.id == source.customAPIID })
+        }
+        self.apiModelSources = initialAPIModels
+        let savedAPIModelID = UserDefaults.standard.string(forKey: "selectedAPIModelSourceID").flatMap(UUID.init(uuidString:))
+        let initialAPIModel = initialAPIModels.first {
+            $0.id == savedAPIModelID && $0.provider == storedProvider &&
+                ($0.provider != .customAPI || $0.customAPIID == initialCustom.id)
+        }
+        self.selectedAPIModelSourceID = initialAPIModel?.id
         let storedModel = Self.savedModel(for: storedProvider)
         let obsoleteModels = ["gpt-4.1-mini", "deepseek-chat", "deepseek-reasoner"]
-        self.modelName = storedProvider == .customAPI
+        self.modelName = initialAPIModel?.model ?? (storedProvider == .customAPI
             ? initialCustom.model
-            : (obsoleteModels.contains(storedModel) ? storedProvider.defaultModel : storedModel)
+            : (obsoleteModels.contains(storedModel) ? storedProvider.defaultModel : storedModel))
         self.reasoningEffort = UserDefaults.standard.string(forKey: "reasoningEffort")
             .flatMap(ReasoningEffort.init(rawValue:)) ?? .medium
         if storedProvider == .customAPI {
@@ -211,6 +262,7 @@ final class TranslationViewModel: ObservableObject {
             ?? (UserDefaults.standard.stringArray(forKey: "floatingProviderOrder") ?? []).map { $0 == ModelProvider.customAPI.rawValue ? customID : $0 }
         let allIDs = ModelProvider.allCases.filter { $0 != .customAPI }.map(\.rawValue)
             + initialCustomSources.map { Self.customSourceID($0.id) }
+            + initialAPIModels.map(\.sourceID)
         self.floatingSourceOrder = Self.normalizedSourceOrder(savedOrder, allIDs: allIDs)
         // Migrate the OpenAI model even when another provider is currently selected,
         // so switching to OpenAI later uses the new default immediately.
@@ -226,7 +278,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     var currentAppVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.6"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.3.0"
     }
 
     func checkForUpdates(force: Bool = false) async {
@@ -254,6 +306,8 @@ final class TranslationViewModel: ObservableObject {
         switch provider {
         case .openAIChatGPT where !openAIModels.isEmpty: return openAIModels
         case .antigravityOAuth where !antigravityModels.isEmpty: return antigravityModels
+        case _ where provider.needsAPIKey:
+            return apiModelSources.filter { $0.baseSourceID == activeBaseSourceID }.map(\.model)
         default: return provider.modelOptions
         }
     }
@@ -314,7 +368,7 @@ final class TranslationViewModel: ObservableObject {
         switch provider {
         case .openAIChatGPT: return openAIModelListError
         case .antigravityOAuth: return antigravityModelListError
-        default: return nil
+        default: return apiModelErrorsBySource[activeBaseSourceID]
         }
     }
 
@@ -322,7 +376,7 @@ final class TranslationViewModel: ObservableObject {
         switch provider {
         case .openAIChatGPT: return isLoadingOpenAIModels
         case .antigravityOAuth: return isLoadingAntigravityModels
-        default: return false
+        default: return loadingAPIModelSources.contains(activeBaseSourceID)
         }
     }
 
@@ -330,7 +384,73 @@ final class TranslationViewModel: ObservableObject {
         switch provider {
         case .openAIChatGPT: refreshOpenAIModels()
         case .antigravityOAuth: refreshAntigravityModels()
+        case _ where provider.needsAPIKey: refreshCurrentAPIModels(force: true)
         default: break
+        }
+    }
+
+    /// Debounce pasted or edited credentials and discard any response for older credentials.
+    func scheduleAPIModelRefresh() {
+        apiModelDebounceTask?.cancel()
+        guard provider.needsAPIKey else { return }
+        let request = currentAPIModelRequest()
+        invalidateAPIModelListIfChanged(request)
+        guard !request.apiKey.isEmpty, !request.endpoint.isEmpty else { return }
+        apiModelDebounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard !Task.isCancelled, let self, self.currentAPIModelRequest() == request else { return }
+            self.refreshCurrentAPIModels(force: false)
+        }
+    }
+
+    func setAPIKeyFromUser(_ value: String) {
+        apiKeyWasEdited = true
+        apiKey = value
+    }
+
+    private func currentAPIModelRequest() -> APIModelRequest {
+        let endpoint = provider == .customAPI ? customAPIEndpoint : (provider.endpoint?.absoluteString ?? "")
+        return APIModelRequest(
+            sourceID: activeBaseSourceID,
+            endpoint: endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
+            apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func invalidateAPIModelListIfChanged(_ request: APIModelRequest) {
+        guard apiModelRequests[request.sourceID] != request else { return }
+        apiModelTasks[request.sourceID]?.cancel()
+        apiModelTasks[request.sourceID] = nil
+        apiModelsBySource[request.sourceID] = nil
+        apiModelErrorsBySource[request.sourceID] = nil
+        loadingAPIModelSources.remove(request.sourceID)
+        apiModelRequests[request.sourceID] = request
+    }
+
+    private func refreshCurrentAPIModels(force: Bool) {
+        guard provider.needsAPIKey else { return }
+        let request = currentAPIModelRequest()
+        invalidateAPIModelListIfChanged(request)
+        if !force, loadingAPIModelSources.contains(request.sourceID) || apiModelsBySource[request.sourceID] != nil {
+            return
+        }
+        apiModelTasks[request.sourceID]?.cancel()
+        apiModelErrorsBySource[request.sourceID] = nil
+        loadingAPIModelSources.insert(request.sourceID)
+        apiModelTasks[request.sourceID] = Task { [weak self, apiModelCatalog] in
+            do {
+                let models = try await apiModelCatalog.availableModels(endpoint: request.endpoint, apiKey: request.apiKey)
+                guard !Task.isCancelled, let self, self.apiModelRequests[request.sourceID] == request else { return }
+                self.apiModelsBySource[request.sourceID] = models
+                self.apiModelErrorsBySource[request.sourceID] = nil
+                self.loadingAPIModelSources.remove(request.sourceID)
+                self.apiModelTasks[request.sourceID] = nil
+            } catch {
+                guard !Task.isCancelled, let self, self.apiModelRequests[request.sourceID] == request else { return }
+                self.apiModelErrorsBySource[request.sourceID] = error.localizedDescription
+                self.loadingAPIModelSources.remove(request.sourceID)
+                self.apiModelTasks[request.sourceID] = nil
+            }
         }
     }
 
@@ -354,7 +474,20 @@ final class TranslationViewModel: ObservableObject {
 
     func selectModel(_ model: String) {
         let selected = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !selected.isEmpty, selected != modelName else { return }
+        guard !selected.isEmpty else { return }
+        if provider.needsAPIKey,
+           let matching = apiModelSources.first(where: { $0.baseSourceID == activeBaseSourceID && $0.model == selected }),
+           matching.id != selectedAPIModelSourceID,
+           let source = allTranslationSources.first(where: { $0.apiModelID == matching.id }) {
+            selectTranslationSource(source)
+            persistSettings()
+            return
+        }
+        if provider.needsAPIKey, selectedAPIModelSourceID != nil,
+           !apiModelSources.contains(where: { $0.id == selectedAPIModelSourceID && $0.model == selected }) {
+            selectedAPIModelSourceID = nil
+        }
+        guard selected != modelName else { return }
         modelName = selected
         reconcileOpenAIReasoning()
         persistSettings()
@@ -387,11 +520,19 @@ final class TranslationViewModel: ObservableObject {
     }
 
     var activeProviderDisplayName: String {
-        provider == .customAPI ? (selectedCustomAPI?.displayName ?? "自定义 API") : provider.shortName
+        if let id = selectedAPIModelSourceID,
+           let source = allTranslationSources.first(where: { $0.apiModelID == id }) {
+            return source.displayName
+        }
+        return provider == .customAPI ? (selectedCustomAPI?.displayName ?? "自定义 API") : provider.shortName
+    }
+
+    var activeBaseSourceID: String {
+        provider == .customAPI ? selectedCustomAPIID.map(Self.customSourceID) ?? provider.rawValue : provider.rawValue
     }
 
     var activeSourceID: String {
-        provider == .customAPI ? selectedCustomAPIID.map(Self.customSourceID) ?? provider.rawValue : provider.rawValue
+        selectedAPIModelSourceID.map { "api-model.\($0.uuidString)" } ?? activeBaseSourceID
     }
 
     var allTranslationSources: [TranslationSource] {
@@ -401,7 +542,50 @@ final class TranslationViewModel: ObservableObject {
         let custom = customAPISources.map {
             TranslationSource(id: Self.customSourceID($0.id), provider: .customAPI, customAPIID: $0.id, displayName: $0.displayName)
         }
-        return builtIns + custom
+        let baseSources = builtIns + custom
+        let models = apiModelSources.compactMap { model -> TranslationSource? in
+            guard let base = baseSources.first(where: { $0.id == model.baseSourceID }) else { return nil }
+            return TranslationSource(
+                id: model.sourceID, provider: model.provider, customAPIID: model.customAPIID,
+                displayName: "\(base.displayName) · \(model.model)", modelOverride: model.model, apiModelID: model.id
+            )
+        }
+        return baseSources + models
+    }
+
+    var apiModelChoices: [String] {
+        let fetched = apiModelsBySource[activeBaseSourceID] ?? []
+        let saved = apiModelSources.filter { $0.baseSourceID == activeBaseSourceID }.map(\.model)
+        var seen = Set<String>()
+        return (fetched + saved).filter { seen.insert($0).inserted }
+    }
+
+    func isAPIModelAdded(_ model: String) -> Bool {
+        apiModelSources.contains { $0.baseSourceID == activeBaseSourceID && $0.model == model }
+    }
+
+    func setAPIModelAdded(_ rawModel: String, enabled: Bool) {
+        guard provider.needsAPIKey else { return }
+        let model = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else { return }
+        let baseID = activeBaseSourceID
+        let existing = apiModelSources.first { $0.baseSourceID == baseID && $0.model == model }
+        if enabled, existing == nil {
+            let added = APIModelSource(provider: provider, customAPIID: provider == .customAPI ? selectedCustomAPIID : nil, model: model)
+            apiModelSources.append(added)
+            floatingSourceOrder.append(added.sourceID)
+        } else if !enabled, let existing {
+            if selectedAPIModelSourceID == existing.id,
+               let base = allTranslationSources.first(where: { $0.id == baseID }) {
+                selectTranslationSource(base)
+                guard selectedAPIModelSourceID != existing.id else { return }
+            }
+            apiModelSources.removeAll { $0.id == existing.id }
+            floatingSourceIDs.remove(existing.sourceID)
+            floatingSourceOrder.removeAll { $0 == existing.sourceID }
+            if floatingSourceIDs.isEmpty { floatingSourceIDs.insert(baseID) }
+        }
+        persistAPIModelSources()
     }
 
     var enabledFloatingSources: [TranslationSource] {
@@ -477,7 +661,8 @@ final class TranslationViewModel: ObservableObject {
 
     func selectProvider(_ newProvider: ModelProvider) {
         guard newProvider != provider else { return }
-        persistCurrentProviderSettings()
+        guard persistCurrentProviderSettings() else { return }
+        selectedAPIModelSourceID = nil
         provider = newProvider
         if newProvider == .customAPI, let config = selectedCustomAPI {
             customAPIDisplayName = config.displayName
@@ -502,7 +687,9 @@ final class TranslationViewModel: ObservableObject {
 
     func selectTranslationSource(_ source: TranslationSource) {
         guard source.id != activeSourceID else { return }
-        persistCurrentProviderSettings()
+        let previousBaseID = activeBaseSourceID
+        let previousAPIKey = apiKey
+        guard persistCurrentProviderSettings() else { return }
 
         if source.provider == .customAPI,
            let id = source.customAPIID,
@@ -511,16 +698,19 @@ final class TranslationViewModel: ObservableObject {
             selectedCustomAPIID = id
             customAPIDisplayName = config.displayName
             customAPIEndpoint = config.endpoint
-            modelName = config.model
-            apiKey = keychain.readAPIKey(account: config.keychainAccount) ?? ""
+            modelName = source.modelOverride ?? config.model
+            apiKey = previousBaseID == Self.customSourceID(id)
+                ? previousAPIKey : (keychain.readAPIKey(account: config.keychainAccount) ?? "")
             UserDefaults.standard.set(id.uuidString, forKey: "selectedCustomAPIID")
         } else {
             provider = source.provider
-            modelName = Self.savedModel(for: source.provider)
+            modelName = source.modelOverride ?? Self.savedModel(for: source.provider)
             apiKey = source.provider.needsAPIKey
-                ? (keychain.readAPIKey(for: source.provider) ?? "")
+                ? (previousBaseID == source.provider.rawValue ? previousAPIKey : (keychain.readAPIKey(for: source.provider) ?? ""))
                 : ""
         }
+        selectedAPIModelSourceID = source.apiModelID
+        UserDefaults.standard.set(source.apiModelID?.uuidString, forKey: "selectedAPIModelSourceID")
 
         reconcileOpenAIReasoning()
         errorMessage = nil
@@ -533,14 +723,16 @@ final class TranslationViewModel: ObservableObject {
     }
 
     func selectCustomAPI(_ id: UUID) {
-        persistCurrentProviderSettings()
+        guard persistCurrentProviderSettings() else { return }
         guard let config = customAPISources.first(where: { $0.id == id }) else { return }
+        selectedAPIModelSourceID = nil
         selectedCustomAPIID = id
         customAPIDisplayName = config.displayName
         customAPIEndpoint = config.endpoint
         modelName = config.model
         apiKey = keychain.readAPIKey(account: config.keychainAccount) ?? ""
         UserDefaults.standard.set(id.uuidString, forKey: "selectedCustomAPIID")
+        scheduleAPIModelRefresh()
     }
 
     func authorizeSelectedAPIKeyFromKeychain() {
@@ -552,7 +744,8 @@ final class TranslationViewModel: ObservableObject {
     }
 
     func addCustomAPI() {
-        persistCurrentProviderSettings()
+        guard persistCurrentProviderSettings() else { return }
+        selectedAPIModelSourceID = nil
         let config = CustomAPISource(displayName: "新自定义 API")
         customAPISources.append(config)
         floatingSourceOrder.append(Self.customSourceID(config.id))
@@ -567,15 +760,33 @@ final class TranslationViewModel: ObservableObject {
     func deleteSelectedCustomAPI() {
         guard customAPISources.count > 1, let id = selectedCustomAPIID else { return }
         let sourceID = Self.customSourceID(id)
+        let removedModelSourceIDs = apiModelSources.filter { $0.customAPIID == id }.map(\.sourceID)
+        if apiModelSources.contains(where: { $0.id == selectedAPIModelSourceID && $0.customAPIID == id }) {
+            selectedAPIModelSourceID = nil
+        }
+        apiModelSources.removeAll { $0.customAPIID == id }
+        for modelID in removedModelSourceIDs {
+            floatingSourceIDs.remove(modelID)
+            floatingSourceOrder.removeAll { $0 == modelID }
+        }
+        apiModelTasks[sourceID]?.cancel()
+        apiModelTasks[sourceID] = nil
+        apiModelRequests[sourceID] = nil
+        apiModelsBySource[sourceID] = nil
+        apiModelErrorsBySource[sourceID] = nil
+        loadingAPIModelSources.remove(sourceID)
         _ = keychain.deleteAPIKey(account: "customAPI.\(id.uuidString)")
         customAPISources.removeAll { $0.id == id }
         floatingSourceIDs.remove(sourceID)
         floatingSourceOrder.removeAll { $0 == sourceID }
+        if floatingSourceIDs.isEmpty { floatingSourceIDs.insert(Self.customSourceID(customAPISources[0].id)) }
         selectCustomAPI(customAPISources[0].id)
         persistCustomSources()
+        persistAPIModelSources()
     }
 
     func refreshLoginStatus() {
+        if provider.needsAPIKey { scheduleAPIModelRefresh() }
         if !hasRequestedOpenAIModels { refreshOpenAIModels() }
         let shouldWarmAntigravity = provider == .antigravityOAuth
             || floatingSourceIDs.contains(ModelProvider.antigravityOAuth.rawValue)
@@ -637,7 +848,7 @@ final class TranslationViewModel: ObservableObject {
         let model = modelName
         let reasoning = reasoningEffort
         let key = apiKey
-        let cacheKey = makeCacheKey(text: text, source: source, target: target, provider: selectedProvider, model: model, reasoning: reasoning, sourceID: selectedProvider == .customAPI ? selectedCustomAPIID.map(Self.customSourceID) : nil)
+        let cacheKey = makeCacheKey(text: text, source: source, target: target, provider: selectedProvider, model: model, reasoning: reasoning, sourceID: selectedSourceID)
 
         if let cached = translationCache[cacheKey] {
             translatedText = cached
@@ -717,7 +928,8 @@ final class TranslationViewModel: ObservableObject {
             target: targetLanguage,
             provider: provider,
             model: modelName,
-            reasoning: reasoningEffort
+            reasoning: reasoningEffort,
+            sourceID: activeSourceID
         )
         if let cached = translationCache[cacheKey] {
             translatedText = cached
@@ -766,12 +978,11 @@ final class TranslationViewModel: ObservableObject {
         for translationSource in selected {
             let selectedProvider = translationSource.provider
             let customConfig = translationSource.customAPIID.flatMap { id in customAPISources.first { $0.id == id } }
-            let model = customConfig?.model ?? (selectedProvider == provider
+            let model = translationSource.modelOverride ?? customConfig?.model ?? (selectedProvider == provider
                 ? modelName
                 : (UserDefaults.standard.string(forKey: Self.modelKey(for: selectedProvider)) ?? selectedProvider.defaultModel))
             let reasoning = reasoningEffort
-            let key = customConfig.map { keychain.readAPIKey(account: $0.keychainAccount) ?? "" }
-                ?? (selectedProvider == provider ? apiKey : (keychain.readAPIKey(for: selectedProvider) ?? ""))
+            let key = apiKey(for: translationSource)
             let cacheKey = makeCacheKey(
                 text: text,
                 source: source,
@@ -836,7 +1047,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     func translateQuickInput(_ text: String) async throws -> String {
-        let defaultSource = TranslationSource(
+        let defaultSource = allTranslationSources.first(where: { $0.id == activeSourceID }) ?? TranslationSource(
             id: activeSourceID,
             provider: provider,
             customAPIID: provider == .customAPI ? selectedCustomAPIID : nil,
@@ -846,7 +1057,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     func translateWithDefaultFallback(_ text: String) async throws -> DefaultFallbackTranslationResult {
-        let defaultSource = TranslationSource(
+        let defaultSource = allTranslationSources.first(where: { $0.id == activeSourceID }) ?? TranslationSource(
             id: activeSourceID,
             provider: provider,
             customAPIID: provider == .customAPI ? selectedCustomAPIID : nil,
@@ -872,7 +1083,7 @@ final class TranslationViewModel: ObservableObject {
     private func translateQuickInput(_ text: String, with sourceConfig: TranslationSource) async throws -> String {
         let selectedProvider = sourceConfig.provider
         let customConfig = sourceConfig.customAPIID.flatMap { id in customAPISources.first { $0.id == id } }
-        let selectedModel = customConfig?.model ?? (selectedProvider == provider
+        let selectedModel = sourceConfig.modelOverride ?? customConfig?.model ?? (selectedProvider == provider
             ? modelName
             : (UserDefaults.standard.string(forKey: Self.modelKey(for: selectedProvider)) ?? selectedProvider.defaultModel))
         let target = floatingTargetLanguage(for: text)
@@ -901,13 +1112,10 @@ final class TranslationViewModel: ObservableObject {
             return result
         }
 
-        let selectedKey: String
         let endpoint: String
         if selectedProvider == .customAPI, let config = customConfig {
-            selectedKey = keychain.readAPIKey(account: config.keychainAccount) ?? apiKey
             endpoint = config.endpoint
         } else {
-            selectedKey = selectedProvider == provider ? apiKey : (keychain.readAPIKey(for: selectedProvider) ?? "")
             endpoint = ""
         }
         return try await directService.translate(
@@ -917,7 +1125,7 @@ final class TranslationViewModel: ObservableObject {
             provider: selectedProvider,
             model: selectedModel,
             reasoning: .none,
-            apiKey: selectedKey,
+            apiKey: apiKey(for: sourceConfig),
             customEndpoint: endpoint
         )
     }
@@ -1011,8 +1219,9 @@ final class TranslationViewModel: ObservableObject {
     }
 
     func persistSettings() {
-        persistCurrentProviderSettings()
+        guard persistCurrentProviderSettings() else { return }
         UserDefaults.standard.set(provider.rawValue, forKey: "provider")
+        UserDefaults.standard.set(selectedAPIModelSourceID?.uuidString, forKey: "selectedAPIModelSourceID")
         UserDefaults.standard.set(reasoningEffort.rawValue, forKey: "reasoningEffort")
         UserDefaults.standard.set(Array(floatingSourceIDs).sorted(), forKey: "floatingSourceIDs")
         UserDefaults.standard.set(floatingSourceOrder, forKey: "floatingSourceOrder")
@@ -1021,9 +1230,11 @@ final class TranslationViewModel: ObservableObject {
         UserDefaults.standard.set(Double(resultFontSize), forKey: "resultFontSize")
     }
 
-    private func persistCurrentProviderSettings() {
+    @discardableResult
+    private func persistCurrentProviderSettings() -> Bool {
         let trimmedModel = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
         modelName = trimmedModel
+        var apiKeySaved = true
         if provider == .customAPI, let id = selectedCustomAPIID,
            let index = customAPISources.firstIndex(where: { $0.id == id }) {
             let trimmedName = customAPIDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1031,17 +1242,27 @@ final class TranslationViewModel: ObservableObject {
             customAPIEndpoint = customAPIEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
             customAPISources[index].displayName = customAPIDisplayName
             customAPISources[index].endpoint = customAPIEndpoint
-            customAPISources[index].model = trimmedModel
+            if selectedAPIModelSourceID == nil { customAPISources[index].model = trimmedModel }
             apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            _ = keychain.saveAPIKey(apiKey, account: customAPISources[index].keychainAccount)
+            if !apiKey.isEmpty || apiKeyWasEdited {
+                apiKeySaved = keychain.saveAPIKey(apiKey, account: customAPISources[index].keychainAccount)
+            }
             persistCustomSources()
-        } else {
+        } else if selectedAPIModelSourceID == nil {
             UserDefaults.standard.set(trimmedModel, forKey: modelKey(for: provider))
         }
         if provider.needsAPIKey, provider != .customAPI {
             apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            _ = keychain.saveAPIKey(apiKey, for: provider)
+            if !apiKey.isEmpty || apiKeyWasEdited {
+                apiKeySaved = keychain.saveAPIKey(apiKey, for: provider)
+            }
         }
+        if apiKeySaved {
+            apiKeyWasEdited = false
+            return true
+        }
+        errorMessage = "无法保存 API Key，请检查钥匙串权限。"
+        return false
     }
 
     private func floatingTargetLanguage(for text: String) -> LanguageOption {
@@ -1097,12 +1318,10 @@ final class TranslationViewModel: ObservableObject {
         let provider = translationSource.provider
         let customConfig = translationSource.customAPIID.flatMap { id in customAPISources.first { $0.id == id } }
 
-        let model = customConfig?.model ?? (provider == self.provider
+        let model = translationSource.modelOverride ?? customConfig?.model ?? (provider == self.provider
             ? modelName
             : (UserDefaults.standard.string(forKey: Self.modelKey(for: provider)) ?? provider.defaultModel))
-        let key = customConfig.map { keychain.readAPIKey(account: $0.keychainAccount) ?? "" } ?? (provider == self.provider
-            ? apiKey
-            : (keychain.readAPIKey(for: provider) ?? ""))
+        let key = apiKey(for: translationSource)
 
         if provider == .openAIChatGPT {
             guard await codexService.loginStatus() else { throw CodexCLIService.ServiceError.notLoggedIn }
@@ -1145,6 +1364,15 @@ final class TranslationViewModel: ObservableObject {
         "modelName.\(provider.rawValue)"
     }
 
+    private func apiKey(for source: TranslationSource) -> String {
+        if source.provider == .customAPI {
+            guard let id = source.customAPIID, let config = customAPISources.first(where: { $0.id == id }) else { return "" }
+            if provider == .customAPI, selectedCustomAPIID == id { return apiKey }
+            return keychain.readAPIKey(account: config.keychainAccount) ?? ""
+        }
+        return source.provider == provider ? apiKey : (keychain.readAPIKey(for: source.provider) ?? "")
+    }
+
     private static func savedModel(for provider: ModelProvider) -> String {
         let stored = UserDefaults.standard.string(forKey: modelKey(for: provider))
             ?? (provider == .openAIChatGPT ? UserDefaults.standard.string(forKey: "modelName") : nil)
@@ -1183,6 +1411,15 @@ final class TranslationViewModel: ObservableObject {
             UserDefaults.standard.set(data, forKey: "customAPISources")
         }
         UserDefaults.standard.set(selectedCustomAPIID?.uuidString, forKey: "selectedCustomAPIID")
+        UserDefaults.standard.set(Array(floatingSourceIDs).sorted(), forKey: "floatingSourceIDs")
+        UserDefaults.standard.set(floatingSourceOrder, forKey: "floatingSourceOrder")
+    }
+
+    private func persistAPIModelSources() {
+        if let data = try? JSONEncoder().encode(apiModelSources) {
+            UserDefaults.standard.set(data, forKey: "apiModelSources")
+        }
+        UserDefaults.standard.set(selectedAPIModelSourceID?.uuidString, forKey: "selectedAPIModelSourceID")
         UserDefaults.standard.set(Array(floatingSourceIDs).sorted(), forKey: "floatingSourceIDs")
         UserDefaults.standard.set(floatingSourceOrder, forKey: "floatingSourceOrder")
     }

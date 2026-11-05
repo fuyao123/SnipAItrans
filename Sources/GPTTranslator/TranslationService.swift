@@ -481,7 +481,7 @@ struct CodexCLIService: Sendable {
             // The app-server protocol is experimental. Keep the established CLI path as a fallback.
         }
         let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("gpt-translator-\(UUID().uuidString).txt")
+            .appendingPathComponent("snipaitrans-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: outputURL) }
 
         let sourceDescription = source == .auto ? "the detected source language" : source.promptName
@@ -647,7 +647,7 @@ private enum CodexModelListClient {
 
         try send([
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": ["clientInfo": ["name": "gpt-translator", "version": "1.0"],
+            "params": ["clientInfo": ["name": "snipaitrans", "version": "1.0"],
                        "capabilities": ["experimentalApi": true]]
         ])
         _ = try response(id: 1)
@@ -843,7 +843,7 @@ private final class CodexAppServerClient: @unchecked Sendable {
         try send([
             "jsonrpc": "2.0", "id": initializeID, "method": "initialize",
             "params": [
-                "clientInfo": ["name": "gpt-translator", "version": "1.0"],
+                "clientInfo": ["name": "snipaitrans", "version": "1.0"],
                 "capabilities": ["experimentalApi": true]
             ]
         ])
@@ -1022,7 +1022,7 @@ struct DirectProviderService: Sendable {
                 .init(role: "system", content: systemPrompt),
                 .init(role: "user", content: text)
             ],
-            reasoning_effort: reasoning.apiValue
+            reasoning_effort: provider == .deepSeek && reasoning == .none ? "none" : reasoning.apiValue
         )
 
         var request = URLRequest(url: url)

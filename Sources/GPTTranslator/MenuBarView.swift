@@ -45,7 +45,7 @@ struct MenuBarView: View {
             HStack(spacing: 8) {
                 Image(systemName: "character.bubble.fill")
                     .foregroundStyle(.tint)
-                Text("GPT 翻译助手")
+                Text(AppIdentity.name)
                     .font(.headline)
                 Spacer()
                 Button {
@@ -266,7 +266,7 @@ struct MenuBarView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows
-                .first(where: { $0.canBecomeMain && $0.title == "GPT 翻译助手" })?
+                .first(where: { $0.canBecomeMain && $0.title == AppIdentity.name })?
                 .makeKeyAndOrderFront(nil)
         }
     }
