@@ -211,6 +211,16 @@ final class AppleTranslationService {
         let hypotheses = recognizer.languageHypotheses(withMaximum: 8)
         let englishConfidence = hypotheses[.english] ?? 0
         let highestConfidence = hypotheses.values.max() ?? 0
+        // A single drug name or other unfamiliar English term can be assigned
+        // to Spanish/French with very low confidence and no English hypothesis
+        // at all (e.g. "bevacizumab"). Only use the installed English pair as
+        // a fallback when detection is ambiguous; an explicit source language
+        // or an installed detected pair always takes precedence.
+        if wordCount == 1,
+           text.unicodeScalars.allSatisfy({ (0x41...0x5A).contains($0.value) || (0x61...0x7A).contains($0.value) }),
+           highestConfidence < 0.5 {
+            return true
+        }
         return englishConfidence >= 0.18 && englishConfidence >= highestConfidence * 0.5
     }
 

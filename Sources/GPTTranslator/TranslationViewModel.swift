@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import NaturalLanguage
 import SwiftUI
@@ -151,6 +152,8 @@ final class TranslationViewModel: ObservableObject {
     @Published var resultFontSize: CGFloat
     @Published var floatingSourceIDs: Set<String>
     @Published private(set) var floatingSourceOrder: [String]
+    @Published private(set) var floatingSourceText = ""
+    @Published private(set) var floatingErrorMessage: String?
     @Published private(set) var comparisonResults: [ComparisonTranslationResult] = []
     @Published private(set) var providerConnectionStates: [String: ProviderConnectionState] = [:]
     @Published private(set) var isTestingConnections = false
@@ -171,6 +174,8 @@ final class TranslationViewModel: ObservableObject {
     private let directService: DirectProviderService
     private let apiModelCatalog: APIModelCatalog
     let appleService: AppleTranslationService
+    let ollamaService: OllamaService
+    private var ollamaObservation: AnyCancellable?
     private let keychain: KeychainStore
     private var automaticTranslationTask: Task<Void, Never>?
     private var pendingAutomaticTranslation = false
@@ -180,6 +185,7 @@ final class TranslationViewModel: ObservableObject {
     private var comparisonTasks: [Task<Void, Never>] = []
     private var connectionMonitorTask: Task<Void, Never>?
     private var hasStartedAntigravityWarmUp = false
+    private var hasStartedCodexWarmUp = false
     private var hasRequestedOpenAIModels = false
     private struct APIModelRequest: Equatable {
         let sourceID: String
@@ -199,6 +205,7 @@ final class TranslationViewModel: ObservableObject {
         directService: DirectProviderService = DirectProviderService(),
         apiModelCatalog: APIModelCatalog = APIModelCatalog(),
         appleService: AppleTranslationService = AppleTranslationService(),
+        ollamaService: OllamaService = OllamaService(),
         keychain: KeychainStore = KeychainStore()
     ) {
         self.codexService = codexService
@@ -206,6 +213,7 @@ final class TranslationViewModel: ObservableObject {
         self.directService = directService
         self.apiModelCatalog = apiModelCatalog
         self.appleService = appleService
+        self.ollamaService = ollamaService
         self.keychain = keychain
 
         let storedProvider = UserDefaults.standard.string(forKey: "provider")
@@ -270,6 +278,9 @@ final class TranslationViewModel: ObservableObject {
         if decodedCustomSources.isEmpty, let legacyKey = keychain.readAPIKey(for: .customAPI), !legacyKey.isEmpty {
             _ = keychain.saveAPIKey(legacyKey, account: initialCustom.keychainAccount)
         }
+        ollamaObservation = ollamaService.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor [weak self] in self?.objectWillChange.send() }
+        }
         refreshLoginStatus()
     }
 
@@ -278,7 +289,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     var currentAppVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.3.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.0"
     }
 
     func checkForUpdates(force: Bool = false) async {
@@ -306,6 +317,7 @@ final class TranslationViewModel: ObservableObject {
         switch provider {
         case .openAIChatGPT where !openAIModels.isEmpty: return openAIModels
         case .antigravityOAuth where !antigravityModels.isEmpty: return antigravityModels
+        case .ollama: return ollamaService.modelChoices
         case _ where provider.needsAPIKey:
             return apiModelSources.filter { $0.baseSourceID == activeBaseSourceID }.map(\.model)
         default: return provider.modelOptions
@@ -313,6 +325,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     var availableReasoningEfforts: [ReasoningEffort] {
+        if provider == .ollama { return [] }
         if provider == .openAIChatGPT {
             if let model = openAIModelDetails.first(where: { $0.name == modelName }), !model.supportedEfforts.isEmpty {
                 return model.supportedEfforts
@@ -368,6 +381,7 @@ final class TranslationViewModel: ObservableObject {
         switch provider {
         case .openAIChatGPT: return openAIModelListError
         case .antigravityOAuth: return antigravityModelListError
+        case .ollama: return ollamaService.errorMessage
         default: return apiModelErrorsBySource[activeBaseSourceID]
         }
     }
@@ -376,6 +390,7 @@ final class TranslationViewModel: ObservableObject {
         switch provider {
         case .openAIChatGPT: return isLoadingOpenAIModels
         case .antigravityOAuth: return isLoadingAntigravityModels
+        case .ollama: return ollamaService.isBusy
         default: return loadingAPIModelSources.contains(activeBaseSourceID)
         }
     }
@@ -384,6 +399,7 @@ final class TranslationViewModel: ObservableObject {
         switch provider {
         case .openAIChatGPT: refreshOpenAIModels()
         case .antigravityOAuth: refreshAntigravityModels()
+        case .ollama: ollamaService.refresh()
         case _ where provider.needsAPIKey: refreshCurrentAPIModels(force: true)
         default: break
         }
@@ -604,6 +620,8 @@ final class TranslationViewModel: ObservableObject {
             return false
         case .googleWeb:
             return true
+        case .ollama:
+            return ollamaService.models.contains(modelName)
         case .customAPI:
             guard let config = selectedCustomAPI else { return false }
             return !(keychain.readAPIKey(account: config.keychainAccount) ?? apiKey)
@@ -787,6 +805,7 @@ final class TranslationViewModel: ObservableObject {
 
     func refreshLoginStatus() {
         if provider.needsAPIKey { scheduleAPIModelRefresh() }
+        if provider == .ollama || floatingSourceIDs.contains(ModelProvider.ollama.rawValue) { ollamaService.refresh() }
         if !hasRequestedOpenAIModels { refreshOpenAIModels() }
         let shouldWarmAntigravity = provider == .antigravityOAuth
             || floatingSourceIDs.contains(ModelProvider.antigravityOAuth.rawValue)
@@ -798,11 +817,15 @@ final class TranslationViewModel: ObservableObject {
             refreshAntigravityModels()
         }
         let antigravityModel = provider == .antigravityOAuth ? modelName : Self.savedModel(for: .antigravityOAuth)
+        let shouldWarmCodex = provider == .openAIChatGPT || floatingSourceIDs.contains(ModelProvider.openAIChatGPT.rawValue)
+        let codexModel = provider == .openAIChatGPT ? modelName : Self.savedModel(for: .openAIChatGPT)
+        let codexReasoning = reasoningEffort
 
         Task {
             isLoggedIn = await codexService.loginStatus()
-            if isLoggedIn, provider == .openAIChatGPT {
-                await codexService.warmUp(model: modelName, reasoning: reasoningEffort)
+            if isLoggedIn, shouldWarmCodex, !hasStartedCodexWarmUp {
+                hasStartedCodexWarmUp = true
+                await codexService.warmUp(model: codexModel, reasoning: codexReasoning)
             }
             if startAntigravityWarmUp {
                 await antigravityService.warmUp(model: antigravityModel)
@@ -876,6 +899,8 @@ final class TranslationViewModel: ObservableObject {
                         target: target
                     )
                     providerConnectionStates[ModelProvider.appleTranslation.rawValue] = .connected
+                } else if selectedProvider == .ollama {
+                    result = try await ollamaService.translate(text: text, source: source, target: target, model: model)
                 } else {
                     result = try await directService.translate(
                         text: text,
@@ -959,14 +984,11 @@ final class TranslationViewModel: ObservableObject {
     }
 
     func translateForFloatingWindow(_ text: String) {
-        automaticTranslationTask?.cancel()
         comparisonTasks.forEach { $0.cancel() }
         comparisonTasks.removeAll()
 
-        lastSubmittedText = text
-        sourceText = text
-        translatedText = ""
-        errorMessage = nil
+        floatingSourceText = text
+        floatingErrorMessage = nil
 
         let selected = enabledFloatingSources
         comparisonResults = selected.map {
@@ -1019,6 +1041,8 @@ final class TranslationViewModel: ObservableObject {
                             target: target
                         )
                         self.providerConnectionStates[ModelProvider.appleTranslation.rawValue] = .connected
+                    } else if selectedProvider == .ollama {
+                        result = try await ollamaService.translate(text: text, source: source, target: target, model: model)
                     } else {
                         result = try await directService.translate(
                             text: text,
@@ -1031,19 +1055,24 @@ final class TranslationViewModel: ObservableObject {
                             customEndpoint: customConfig?.endpoint ?? self.customAPIEndpoint
                         )
                     }
-                    guard !Task.isCancelled, self.sourceText == text else { return }
+                    guard !Task.isCancelled, self.floatingSourceText == text else { return }
                     self.storeInCache(result, for: cacheKey)
                     self.updateComparisonResult(for: translationSource.id, translatedText: result, errorMessage: nil)
-                    if translationSource.id == self.activeSourceID {
-                        self.translatedText = result
-                    }
                 } catch {
-                    guard !Task.isCancelled, self.sourceText == text else { return }
+                    guard !Task.isCancelled, self.floatingSourceText == text else { return }
                     self.updateComparisonResult(for: translationSource.id, translatedText: nil, errorMessage: error.localizedDescription)
                 }
             }
             comparisonTasks.append(task)
         }
+    }
+
+    func showFloatingError(_ message: String) {
+        comparisonTasks.forEach { $0.cancel() }
+        comparisonTasks.removeAll()
+        floatingSourceText = ""
+        floatingErrorMessage = message
+        comparisonResults = []
     }
 
     func translateQuickInput(_ text: String) async throws -> String {
@@ -1112,6 +1141,10 @@ final class TranslationViewModel: ObservableObject {
             return result
         }
 
+        if selectedProvider == .ollama {
+            return try await ollamaService.translate(text: text, source: source, target: target, model: selectedModel)
+        }
+
         let endpoint: String
         if selectedProvider == .customAPI, let config = customConfig {
             endpoint = config.endpoint
@@ -1149,6 +1182,12 @@ final class TranslationViewModel: ObservableObject {
         } else if floatingSourceIDs.count > 1 {
             floatingSourceIDs.remove(source.id)
         }
+        Task { await testEnabledProviderConnections() }
+    }
+
+    func enableOllamaAfterSetup() {
+        floatingSourceIDs.insert(ModelProvider.ollama.rawValue)
+        persistSettings()
         Task { await testEnabledProviderConnections() }
     }
 
@@ -1346,6 +1385,8 @@ final class TranslationViewModel: ObservableObject {
                 target: target,
                 sampleText: testText
             )
+        } else if provider == .ollama {
+            try await ollamaService.testConnection(model: model)
         } else {
             _ = try await directService.translate(
                 text: testText,

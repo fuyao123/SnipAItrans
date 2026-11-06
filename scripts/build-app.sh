@@ -21,7 +21,7 @@ fi
 binary_path="$(swift build "${build_args[@]}" --show-bin-path)/SnipAItrans"
 applications_dir="${APP_OUTPUT_DIR:-$HOME/Applications}"
 app_path="$applications_dir/SnipAItrans.app"
-app_version="${APP_VERSION:-1.3.0}"
+app_version="${APP_VERSION:-1.4.0}"
 
 mkdir -p "$applications_dir"
 rm -rf "$app_path"

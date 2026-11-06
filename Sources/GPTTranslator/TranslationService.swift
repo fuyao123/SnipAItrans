@@ -1,5 +1,12 @@
 import Foundation
 
+private final class TranslationCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+}
+
 struct AntigravityCLIService: Sendable {
     enum ServiceError: LocalizedError, Sendable {
         case notInstalled
@@ -85,7 +92,10 @@ struct AntigravityCLIService: Sendable {
                 model: model,
                 executable: executableURL
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let serviceError as ServiceError {
+            guard !Task.isCancelled else { throw CancellationError() }
             // A long-lived agy process can keep an expired or partially initialized
             // session after the user has successfully logged in again. In that case
             // the stream reports an auth error even though a fresh one-shot process
@@ -100,6 +110,7 @@ struct AntigravityCLIService: Sendable {
             }
             throw normalizedServiceError(serviceError)
         } catch {
+            guard !Task.isCancelled else { throw CancellationError() }
             // Keep a one-shot fallback for older or damaged agy installations. A normal
             // provider error is returned directly so we do not send the same request twice.
             return try await translateOneShot(
@@ -227,21 +238,24 @@ private final class AntigravityStreamClient: @unchecked Sendable {
     }
 
     func translate(prompt: String, model: String, executable: URL) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            queue.async { [self] in
-                do {
-                    let result = try translateSynchronously(prompt: prompt, executable: executable, model: model)
-                    continuation.resume(returning: result)
-                } catch {
-                    // A provider-level error can leave the persistent CLI in a
-                    // bad session state. Drop it before the caller decides whether
-                    // to retry with a fresh one-shot process.
-                    if error is ClientError || error is AntigravityCLIService.ServiceError {
-                        stop()
+        let cancellation = TranslationCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.async { [self] in
+                    guard !cancellation.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+                    do {
+                        let result = try translateSynchronously(prompt: prompt, executable: executable, model: model)
+                        if cancellation.isCancelled { continuation.resume(throwing: CancellationError()) }
+                        else { continuation.resume(returning: result) }
+                    } catch {
+                        // A failed CLI may need a fresh session on the next request.
+                        if error is ClientError || error is AntigravityCLIService.ServiceError { stop() }
+                        continuation.resume(throwing: cancellation.isCancelled ? CancellationError() : error)
                     }
-                    continuation.resume(throwing: error)
                 }
             }
+        } onCancel: {
+            cancellation.cancel()
         }
     }
 
@@ -477,7 +491,10 @@ struct CodexCLIService: Sendable {
                 reasoning: reasoning,
                 executable: codexURL!
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            guard !Task.isCancelled else { throw CancellationError() }
             // The app-server protocol is experimental. Keep the established CLI path as a fallback.
         }
         let outputURL = FileManager.default.temporaryDirectory
@@ -728,23 +745,30 @@ private final class CodexAppServerClient: @unchecked Sendable {
         reasoning: ReasoningEffort,
         executable: URL
     ) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            queue.async { [self] in
-                do {
-                    let result = try translateSynchronously(
-                        text: text,
-                        source: source,
-                        target: target,
-                        model: model,
-                        reasoning: reasoning,
-                        executable: executable
-                    )
-                    continuation.resume(returning: result)
-                } catch {
-                    stop()
-                    continuation.resume(throwing: error)
+        let cancellation = TranslationCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.async { [self] in
+                    guard !cancellation.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+                    do {
+                        let result = try translateSynchronously(
+                            text: text,
+                            source: source,
+                            target: target,
+                            model: model,
+                            reasoning: reasoning,
+                            executable: executable
+                        )
+                        if cancellation.isCancelled { continuation.resume(throwing: CancellationError()) }
+                        else { continuation.resume(returning: result) }
+                    } catch {
+                        stop()
+                        continuation.resume(throwing: cancellation.isCancelled ? CancellationError() : error)
+                    }
                 }
             }
+        } onCancel: {
+            cancellation.cancel()
         }
     }
 
@@ -936,6 +960,12 @@ private final class CodexAppServerClient: @unchecked Sendable {
 }
 
 struct DirectProviderService: Sendable {
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
     enum ServiceError: LocalizedError, Sendable {
         case missingAPIKey
         case unsupportedProvider
@@ -1032,7 +1062,7 @@ struct DirectProviderService: Sendable {
         request.setValue("Bearer \(apiKey.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else { throw ServiceError.invalidResponse }
         guard (200...299).contains(httpResponse.statusCode) else {
             if let errorBody = try? JSONDecoder().decode(ErrorBody.self, from: data),
@@ -1067,7 +1097,7 @@ struct DirectProviderService: Sendable {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else { throw ServiceError.invalidResponse }
         guard (200...299).contains(httpResponse.statusCode) else {
             if httpResponse.statusCode == 429 {

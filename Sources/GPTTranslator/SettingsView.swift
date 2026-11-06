@@ -64,6 +64,8 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    } else if viewModel.provider == .ollama {
+                        OllamaSetupSection(service: viewModel.ollamaService, viewModel: viewModel)
                     } else {
                         if viewModel.provider == .customAPI {
                             HStack {
@@ -100,7 +102,7 @@ struct SettingsView: View {
                     }
                 }
 
-                if viewModel.provider.supportsModelSelection {
+                if viewModel.provider.supportsModelSelection && viewModel.provider != .ollama {
                     settingsSection("模型与推理") {
                     HStack {
                     Picker("当前模型", selection: Binding(
@@ -417,6 +419,74 @@ struct SettingsView: View {
         }
     }
 
+}
+
+private struct OllamaSetupSection: View {
+    @ObservedObject var service: OllamaService
+    @ObservedObject var viewModel: TranslationViewModel
+    @State private var customModel = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("本地模型", selection: Binding(
+                get: { viewModel.modelName },
+                set: { viewModel.selectModel($0) }
+            )) {
+                if !service.modelChoices.contains(viewModel.modelName), !viewModel.modelName.isEmpty {
+                    Text(viewModel.modelName).tag(viewModel.modelName)
+                }
+                ForEach(service.modelChoices, id: \.self) { model in
+                    Text(service.models.contains(model) ? model : "\(model)（未下载）").tag(model)
+                }
+            }
+            .disabled(service.isBusy)
+            HStack {
+                TextField("其他本地模型名称，例如 qwen3:8b", text: $customModel)
+                    .textFieldStyle(.roundedBorder)
+                Button("选择") {
+                    viewModel.selectModel(customModel)
+                    customModel = ""
+                }
+                .disabled(service.isBusy || customModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            HStack {
+                Button(service.models.contains(viewModel.modelName) ? "启用此模型" : "一键安装并启用") {
+                    service.setup(model: viewModel.modelName) { viewModel.enableOllamaAfterSetup() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(service.isBusy || viewModel.modelName.isEmpty)
+                Button("刷新模型") { service.refresh() }
+                    .disabled(service.isBusy)
+                if service.isBusy {
+                    Button("取消") { service.cancelSetup() }
+                }
+                if service.isManagedInstalled {
+                    Button("卸载本地模型与组件") { service.uninstall() }
+                        .disabled(service.isBusy)
+                }
+            }
+            if service.isBusy {
+                if let progress = service.progress {
+                    ProgressView(value: progress)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            Text(service.status)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let error = service.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("自动安装官方 Ollama 并下载所选模型；Qwen2.5 7B 约 4.7 GB。模型在本机运行，空闲 5 分钟后释放内存。卸载只移除本软件安装的组件和模型，不影响已有的 Ollama。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
 }
 
 private struct AutomaticSaveSnapshot: Equatable {

@@ -174,6 +174,11 @@ struct ContentView: View {
                     }
                 }
                 Divider()
+                if viewModel.provider == .ollama {
+                    Button("安装或管理本地模型…") {
+                        globalController.showSettingsWindow()
+                    }
+                }
                 if !viewModel.provider.needsAPIKey || viewModel.modelListError != nil {
                     Button("输入模型名称…") {
                         customModelDraft = viewModel.modelName

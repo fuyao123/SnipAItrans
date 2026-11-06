@@ -33,6 +33,7 @@ SnipAItrans 原名“GPT 翻译助手”，从 1.3.0 开始使用新名称。
 - 使用 ChatGPT OAuth：应用不要求、不保存 OpenAI API Key
 - 支持 OpenAI/ChatGPT OAuth、Gemini/Google OAuth（通过官方 Antigravity CLI）、DeepSeek、智谱 GLM，以及可重复添加的 OpenAI Chat Completions 兼容 API
 - 支持 Apple 离线翻译；首次使用缺失语言时由 macOS 下载语言包，之后可离线使用且不消耗 API token（需要 macOS 15 或更高版本）
+- 支持 Ollama 本地模型；设置中可发现已有模型，或一键安装并启用 Qwen2.5 等模型（Ollama 需要 macOS 14 或更高版本）
 - 每个自定义 API 可独立设置显示名称、接口地址、模型和 API Key
 - 划词和截图悬浮窗支持多来源并行对照、拖拽排序和顺序记忆
 - 菜单栏显示所有已开启来源的连接状态，启动时检测，之后每小时检测，也可手动刷新
@@ -61,11 +62,19 @@ open "$HOME/Applications/SnipAItrans.app"
 
 构建脚本会将应用安装到 `~/Applications/SnipAItrans.app`。首次划词翻译需要在“系统设置 → 隐私与安全性 → 辅助功能”中允许这一份应用；首次截图时需要允许屏幕录制。
 
+## Ollama 本地翻译
+
+在“设置 → 翻译服务”选择“Ollama 本地大模型”，选择已有或推荐模型，然后点击“一键安装并启用”。如果已有 Ollama 服务在运行，应用会发现其中的本地模型；否则会下载官方 Ollama 到当前用户目录，再下载所选模型。也可以输入其他 Ollama 模型名称。Qwen2.5 7B 约需 4.7 GB 存储空间；安装需要联网，模型推理在本机进行。
+
+本软件管理的 Ollama 使用独立目录，关闭应用时停止其启动的服务；模型空闲 5 分钟后会从内存卸载。“卸载本地模型与组件”将本软件安装的运行环境和模型移到废纸篓，不会删除用户原有的 Ollama 或其模型；清空废纸篓后释放磁盘空间。
+
+划词时，所有在“悬浮窗结果来源”中启用的来源会并行翻译：如果同时勾选了云端来源，选中文字也会发送给相应云端服务。
+
 应用图标采用自制蓝紫渐变双气泡设计；许可说明见 `THIRD_PARTY_NOTICES.md`。菜单栏图标为适配浅色和深色菜单栏的单色环形翻译标识。
 
 ## DMG 安装
 
-从 [GitHub Releases](https://github.com/fuyao123/SnipAItrans/releases) 下载 `SnipAItrans-1.3.0-macOS.dmg`，打开后将 `SnipAItrans` 拖入 Applications。当前公开构建未使用 Apple Developer ID 公证；macOS 首次打开时可能需要在 Finder 中右键应用并选择“打开”。
+从 [GitHub Releases](https://github.com/fuyao123/SnipAItrans/releases) 下载 `SnipAItrans-1.4.0-macOS.dmg`，打开后将 `SnipAItrans` 拖入 Applications。当前公开构建未使用 Apple Developer ID 公证；macOS 首次打开时可能需要在 Finder 中右键应用并选择“打开”。
 
 从 1.2.6 或更早版本升级时，请先退出旧版并手动下载新版：仓库更名后，旧版的自动更新检查可能无法识别新地址。新版沿用原来的应用标识和钥匙串服务，以保留设置和凭据；如系统要求重新授权，请在系统设置或应用设置中完成授权。
 

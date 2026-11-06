@@ -358,10 +358,10 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             guard let text = await selectedTextWithClipboardFallback(),
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 logger.error("translateSelection selectedText=nil-or-empty")
-                showResultWindow(at: location)
-                viewModel?.errorMessage = accessibilityTrusted
+                let message = accessibilityTrusted
                     ? "没有读取到已选中的文字。请先选中需要翻译的文字。"
                     : "需要辅助功能权限才能读取其他软件中的选中文字。"
+                showFloatingError(message, at: location)
                 return
             }
             guard viewModel?.shouldTranslateFloatingText(text) != false else {
@@ -823,7 +823,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 guard let selection = try await selectRegion(from: displayImage) else { return }
                 guard let recognizedText = try recognizeText(in: selection.image),
                       !recognizedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    viewModel?.errorMessage = "选区中没有识别到文字。"
+                    showFloatingError("选区中没有识别到文字。", at: NSEvent.mouseLocation)
                     return
                 }
                 guard let viewModel else {
@@ -833,7 +833,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 showResultWindow(at: NSEvent.mouseLocation)
                 viewModel.translateForFloatingWindow(recognizedText)
             } catch {
-                viewModel?.errorMessage = error.localizedDescription
+                showFloatingError(error.localizedDescription, at: NSEvent.mouseLocation)
             }
         }
     }
@@ -1539,6 +1539,11 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         pendingSelectionLocation = nil
     }
 
+    private func showFloatingError(_ message: String, at location: NSPoint) {
+        viewModel?.showFloatingError(message)
+        showResultWindow(at: location)
+    }
+
     private func showResultWindow(at location: NSPoint) {
         guard let viewModel else { return }
         resultWindowAnchor = location
@@ -1605,7 +1610,8 @@ final class GlobalTranslationController: NSObject, ObservableObject {
 
     private func desiredResultWindowSize() -> NSSize {
         guard let viewModel else { return NSSize(width: 420, height: 180) }
-        let texts = [viewModel.sourceText] + viewModel.comparisonResults.compactMap { $0.translatedText ?? $0.errorMessage }
+        let texts = [viewModel.floatingSourceText, viewModel.floatingErrorMessage ?? ""]
+            + viewModel.comparisonResults.compactMap { $0.translatedText ?? $0.errorMessage }
         let font = NSFont.systemFont(ofSize: viewModel.resultFontSize)
         let longestLineWidth = texts
             .flatMap { $0.components(separatedBy: .newlines) }
@@ -1613,7 +1619,11 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             .max() ?? 280
         let width = min(max(longestLineWidth + 88, 390), 560)
         let textWidth = width - 56
-        let sourceHeight = min(measuredTextHeight(viewModel.sourceText, width: textWidth, font: .systemFont(ofSize: 11)), 160)
+        let sourceHeight = min(measuredTextHeight(
+            viewModel.floatingErrorMessage ?? viewModel.floatingSourceText,
+            width: textWidth,
+            font: .systemFont(ofSize: 11)
+        ), 160)
         let resultsHeight = viewModel.comparisonResults.reduce(CGFloat.zero) { total, result in
             let contentHeight: CGFloat
             if result.isLoading {
@@ -1966,23 +1976,29 @@ private struct SelectionTranslationView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top, spacing: 10) {
-                        Text(viewModel.sourceText)
+                    if let error = viewModel.floatingErrorMessage {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
+                    } else {
+                        HStack(alignment: .top, spacing: 10) {
+                            Text(viewModel.floatingSourceText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
 
-                        Button("复制", systemImage: "doc.on.doc") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(viewModel.sourceText, forType: .string)
+                            Button("复制", systemImage: "doc.on.doc") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(viewModel.floatingSourceText, forType: .string)
+                            }
+                            .buttonStyle(.borderless)
+                            .fixedSize()
+                            .help("复制识别或选中的原文")
                         }
-                        .buttonStyle(.borderless)
-                        .fixedSize()
-                        .help("复制识别或选中的原文")
+                        .padding(.horizontal, 12)
                     }
-                    .padding(.horizontal, 12)
 
                     Divider()
 
