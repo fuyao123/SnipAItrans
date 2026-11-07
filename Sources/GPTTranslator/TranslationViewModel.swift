@@ -289,7 +289,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     var currentAppVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.5.0"
     }
 
     func checkForUpdates(force: Bool = false) async {
@@ -607,6 +607,27 @@ final class TranslationViewModel: ObservableObject {
     var enabledFloatingSources: [TranslationSource] {
         let byID = Dictionary(uniqueKeysWithValues: allTranslationSources.map { ($0.id, $0) })
         return floatingSourceOrder.compactMap { floatingSourceIDs.contains($0) ? byID[$0] : nil }
+    }
+
+    /// Available for the PDF reader independently of floating-window choices.
+    var configuredPDFSources: [TranslationSource] {
+        allTranslationSources.filter { source in
+            switch source.provider {
+            case .ollama, .appleTranslation, .googleWeb:
+                return true
+            case .openAIChatGPT:
+                return isLoggedIn || connectionState(for: source) == .connected
+            case .antigravityOAuth:
+                return antigravityService.isInstalled()
+            case .customAPI:
+                guard let id = source.customAPIID,
+                      let config = customAPISources.first(where: { $0.id == id }),
+                      !config.endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+                return !apiKey(for: source).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            default:
+                return !apiKey(for: source).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        }
     }
 
     func isProviderReady(_ provider: ModelProvider) -> Bool {
@@ -1042,7 +1063,11 @@ final class TranslationViewModel: ObservableObject {
                         )
                         self.providerConnectionStates[ModelProvider.appleTranslation.rawValue] = .connected
                     } else if selectedProvider == .ollama {
-                        result = try await ollamaService.translate(text: text, source: source, target: target, model: model)
+                        result = try await ollamaService.translateStreaming(text: text, source: source, target: target, model: model) { [weak self] partial in
+                            guard !Task.isCancelled, let self, self.floatingSourceText == text,
+                                  let index = self.comparisonResults.firstIndex(where: { $0.source.id == translationSource.id }) else { return }
+                            self.comparisonResults[index].translatedText = partial
+                        }
                     } else {
                         result = try await directService.translate(
                             text: text,
@@ -1109,13 +1134,17 @@ final class TranslationViewModel: ObservableObject {
         )
     }
 
-    private func translateQuickInput(_ text: String, with sourceConfig: TranslationSource) async throws -> String {
+    func translatePDFText(_ text: String, with sourceConfig: TranslationSource) async throws -> String {
+        try await translateQuickInput(text, with: sourceConfig, forcedTarget: .chineseSimplified)
+    }
+
+    private func translateQuickInput(_ text: String, with sourceConfig: TranslationSource, forcedTarget: LanguageOption? = nil) async throws -> String {
         let selectedProvider = sourceConfig.provider
         let customConfig = sourceConfig.customAPIID.flatMap { id in customAPISources.first { $0.id == id } }
         let selectedModel = sourceConfig.modelOverride ?? customConfig?.model ?? (selectedProvider == provider
             ? modelName
             : (UserDefaults.standard.string(forKey: Self.modelKey(for: selectedProvider)) ?? selectedProvider.defaultModel))
-        let target = floatingTargetLanguage(for: text)
+        let target = forcedTarget ?? floatingTargetLanguage(for: text)
         let source: LanguageOption = target == .english ? .chineseSimplified : .english
         if selectedProvider == .openAIChatGPT {
             return try await codexService.translate(

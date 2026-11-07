@@ -144,6 +144,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     private var screenshotEditorWindows: [ScreenshotEditorPanel] = []
     private var screenshotTranslationWindow: NSPanel?
     private var settingsWindow: NSWindow?
+    private var pdfReaderWindows: [PDFReaderWindowHost] = []
     private var selectionStatusWindow: NSPanel?
     private var selectionStatusDismissWorkItem: DispatchWorkItem?
     private var pinnedScreenshotWindows: [PinnedScreenshotPanel] = []
@@ -238,7 +239,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     func connect(to viewModel: TranslationViewModel) {
         self.viewModel = viewModel
         resultSizingSubscription = viewModel.$comparisonResults
-            .receive(on: DispatchQueue.main)
+            .debounce(for: .milliseconds(180), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
                 DispatchQueue.main.async { self?.resizeResultWindowToFit() }
             }
@@ -258,6 +259,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             }
         }
         startGlobalHotkeys()
+        PDFOpenRequests.connect(to: self)
     }
 
     func stop() {
@@ -294,6 +296,8 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         screenshotTranslationWindow = nil
         settingsWindow?.close()
         settingsWindow = nil
+        for reader in Array(pdfReaderWindows) { reader.window.close() }
+        pdfReaderWindows.removeAll()
         selectionStatusDismissWorkItem?.cancel()
         selectionStatusDismissWorkItem = nil
         selectionStatusWindow?.orderOut(nil)
@@ -347,6 +351,37 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         settingsWindow = window
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    func showPDFReaderWindow(opening url: URL? = nil) {
+        guard let viewModel else {
+            logger.error("PDF reader requested before translation controller was connected")
+            return
+        }
+        let host: PDFReaderWindowHost
+        if url == nil, let existing = pdfReaderWindows.last {
+            host = existing
+        } else if url != nil, let empty = pdfReaderWindows.first(where: { $0.session.document == nil && !$0.session.isWorking }) {
+            host = empty
+        } else {
+            let pdfSources = PDFTranslationSources(viewModel: viewModel)
+            let session = PDFTranslationSession(
+                modelName: { pdfSources.defaultID },
+                translate: { text, source in try await pdfSources.translate(text, sourceID: source) },
+                translateBatch: { texts, source in try await pdfSources.translateBatch(texts, sourceID: source) },
+                availableSources: { pdfSources.options() }
+            )
+            let created = PDFReaderWindowHost(session: session, viewModel: viewModel)
+            created.onClose = { [weak self, weak created] in
+                guard let created else { return }
+                self?.pdfReaderWindows.removeAll { $0 === created }
+            }
+            pdfReaderWindows.append(created)
+            host = created
+        }
+        if let url { host.session.open(url) }
+        NSApp.activate(ignoringOtherApps: true)
+        host.window.makeKeyAndOrderFront(nil)
     }
 
     func translateSelection() {
@@ -798,12 +833,21 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     }
 
     private func focusedUIElement() -> AXUIElement? {
+        // Never query our own remote file-panel accessibility hierarchy from an
+        // event monitor. ViewBridge can reenter that monitor while holding its
+        // accessibility lock, deadlocking the entire application.
+        guard !shouldIgnoreSelectionObservation else { return nil }
         let systemWide = AXUIElementCreateSystemWide()
         var focused: CFTypeRef?
         guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
               let focused,
               CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
         return unsafeDowncast(focused, to: AXUIElement.self)
+    }
+
+    private var shouldIgnoreSelectionObservation: Bool {
+        if AppFilePanelActivity.isActive || NSApp.isActive { return true }
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier
     }
 
     func translateScreenshot() {
@@ -1233,6 +1277,11 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             let clickCount = event.clickCount
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                guard !self.shouldIgnoreSelectionObservation else {
+                    self.selectionMouseDownLocation = nil
+                    self.selectionTranslationTask?.cancel()
+                    return
+                }
                 if eventType == .leftMouseDown {
                     self.selectionTranslationTask?.cancel()
                     self.selectionMouseDownLocation = location
@@ -1242,6 +1291,10 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                     hypot(location.x - $0.x, location.y - $0.y) >= 4
                 } ?? false
                 self.selectionMouseDownLocation = nil
+                guard !self.isMenuBarLocation(location) else { return }
+                // Avoid accessibility queries on ordinary clicks unless a
+                // visible floating result might need dismissal.
+                guard didDrag || clickCount >= 2 || self.resultWindow?.isVisible == true else { return }
                 // A click that opens another app's menu must not be treated as
                 // the end of a text selection. In the fallback path below we
                 // synthesize Command-C, which would otherwise close the menu
@@ -1250,7 +1303,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 if clickCount >= 2, NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.kingsoft.wpsoffice.mac" {
                     self.logger.debug("WPS double click drag=\(didDrag, privacy: .public) menu=\(self.isMenuBarLocation(location), privacy: .public) excluded=\(excluded, privacy: .public) appActive=\(NSApp.isActive, privacy: .public)")
                 }
-                guard !self.isMenuBarLocation(location), !excluded else { return }
+                guard !excluded else { return }
                 self.dismissUnpinnedResultIfNeeded(at: location)
                 let isTextDoubleClick = clickCount >= 2 && self.isTextSelectionLocation(location)
                 guard didDrag || isTextDoubleClick else { return }
@@ -1260,7 +1313,9 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             guard let self else { return event }
             let location = NSEvent.mouseLocation
-            if !self.isMenuBarLocation(location), !self.isSelectionExcludedInteractionActive() {
+            // A local monitor handles our own windows. Looking up the focused
+            // AX element here can recursively enter ViewBridge's file panel.
+            if !AppFilePanelActivity.isActive, !self.isMenuBarLocation(location) {
                 self.dismissUnpinnedResultIfNeeded(at: location)
             }
             return event
@@ -1626,7 +1681,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         ), 160)
         let resultsHeight = viewModel.comparisonResults.reduce(CGFloat.zero) { total, result in
             let contentHeight: CGFloat
-            if result.isLoading {
+            if result.isLoading && result.translatedText == nil {
                 contentHeight = 20
             } else {
                 let content = result.translatedText ?? result.errorMessage ?? ""
@@ -1650,9 +1705,10 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     }
 
     private func selectedText() -> String? {
-        if NSApp.isActive,
-           let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
-           textView.selectedRange().length > 0 {
+        if shouldIgnoreSelectionObservation {
+            guard !AppFilePanelActivity.isActive,
+                  let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
+                  textView.selectedRange().length > 0 else { return nil }
             let value = textView.string as NSString
             return value.substring(with: textView.selectedRange())
         }
@@ -2011,7 +2067,9 @@ private struct SelectionTranslationView: View {
                                 Text(result.source.displayName)
                                     .font(.subheadline.weight(.semibold))
                                 Spacer()
-                                if let text = result.translatedText {
+                                if result.isLoading, result.translatedText != nil {
+                                    ProgressView().controlSize(.small)
+                                } else if let text = result.translatedText {
                                     Button("复制", systemImage: "doc.on.doc") {
                                         NSPasteboard.general.clearContents()
                                         NSPasteboard.general.setString(text, forType: .string)
@@ -2019,12 +2077,7 @@ private struct SelectionTranslationView: View {
                                     .buttonStyle(.borderless)
                                 }
                             }
-                            if result.isLoading {
-                                HStack(spacing: 8) {
-                                    ProgressView().controlSize(.small)
-                                    Text("正在翻译…").foregroundStyle(.secondary)
-                                }
-                            } else if let error = result.errorMessage {
+                            if let error = result.errorMessage {
                                 Label(error, systemImage: "exclamationmark.triangle.fill")
                                     .foregroundStyle(.red)
                                     .font(.caption)
@@ -2034,6 +2087,11 @@ private struct SelectionTranslationView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .textSelection(.enabled)
+                            } else if result.isLoading {
+                                HStack(spacing: 8) {
+                                    ProgressView().controlSize(.small)
+                                    Text("正在翻译…").foregroundStyle(.secondary)
+                                }
                             }
                         }
                         .padding(12)

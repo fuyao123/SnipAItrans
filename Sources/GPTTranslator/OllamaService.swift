@@ -157,6 +157,101 @@ final class OllamaService: ObservableObject {
         return result
     }
 
+    /// Show partial output for selection translation without treating an
+    /// interrupted or failed stream as a completed translation.
+    func translateStreaming(text: String, source: LanguageOption, target: LanguageOption, model: String,
+                            onPartial: @escaping @MainActor (String) -> Void) async throws -> String {
+        guard Self.isLocalModelName(model) else { throw Failure.message("请选择有效的本地模型。") }
+        let url = try await availableServer(startManaged: true)
+        guard try await listModels(at: url).contains(model) else {
+            throw Failure.message("该本地模型尚未安装，请在设置中安装。")
+        }
+        let sourceName = source == .auto ? "the detected source language" : source.promptName
+        let prompt = "Translate from \(sourceName) to \(target.promptName). Preserve meaning and formatting. Return only the translation.\n\n\(text)"
+        var request = URLRequest(url: url.appendingPathComponent("api/chat"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 180
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model, "stream": true, "keep_alive": "5m",
+            "messages": [["role": "user", "content": prompt]]
+        ])
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw Failure.message("本地模型请求失败，请检查模型是否可用。")
+        }
+        var result = ""
+        var finished = false
+        var lastUpdate = Date.distantPast
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            guard let data = line.data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            if let error = event["error"] as? String { throw Failure.message(error) }
+            if let message = event["message"] as? [String: Any], let content = message["content"] as? String, !content.isEmpty {
+                result += content
+                if Date().timeIntervalSince(lastUpdate) >= 0.12 {
+                    onPartial(result)
+                    lastUpdate = Date()
+                }
+            }
+            if event["done"] as? Bool == true { finished = true; break }
+        }
+        try Task.checkCancellation()
+        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard finished, !trimmed.isEmpty else { throw Failure.message("本地模型翻译未完成，请重试。") }
+        return trimmed
+    }
+
+    /// Translate positioned PDF text blocks in one request while retaining a
+    /// stable mapping back to each block. Older models/servers may not support
+    /// structured output, in which case translate each block separately.
+    func translatePDFBlocks(_ blocks: [String], model: String) async throws -> [String] {
+        guard !blocks.isEmpty else { return [] }
+        if blocks.count == 1 {
+            return [try await translate(text: blocks[0], source: .english, target: .chineseSimplified, model: model)]
+        }
+        guard Self.isLocalModelName(model) else { throw Failure.message("请选择有效的本地模型。") }
+        let url = try await availableServer(startManaged: true)
+        guard try await listModels(at: url).contains(model) else {
+            throw Failure.message("该本地模型尚未安装，请在设置中安装。")
+        }
+        let keys = blocks.indices.map { "b\($0)" }
+        let input = Dictionary(uniqueKeysWithValues: zip(keys, blocks))
+        let inputData = try JSONSerialization.data(withJSONObject: input, options: [.sortedKeys])
+        let inputJSON = String(decoding: inputData, as: UTF8.self)
+        let properties = Dictionary(uniqueKeysWithValues: keys.map { ($0, ["type": "string"]) })
+        let schema: [String: Any] = ["type": "object", "properties": properties, "required": keys, "additionalProperties": false]
+        let prompt = "Translate every JSON value from English into Simplified Chinese. Return one translation for each original key, with all keys unchanged. Preserve numbers, citations, formula symbols, drug names and abbreviations. Do not omit text. Return only JSON.\n\n\(inputJSON)"
+        var request = URLRequest(url: url.appendingPathComponent("api/chat"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 180
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model, "stream": false, "keep_alive": "5m", "format": schema,
+            "options": ["temperature": 0], "messages": [["role": "user", "content": prompt]]
+        ])
+        let (data, response) = try await session.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if ![400, 404, 422].contains(code) {
+            try check(response, data: data)
+            if let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let message = root["message"] as? [String: Any],
+               let content = message["content"] as? String,
+               let json = content.data(using: .utf8),
+               let values = (try? JSONSerialization.jsonObject(with: json)) as? [String: String] {
+                let result = keys.compactMap { values[$0]?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                if result.count == blocks.count && result.allSatisfy({ !$0.isEmpty }) { return result }
+            }
+        }
+        var result: [String] = []
+        for block in blocks {
+            try Task.checkCancellation()
+            result.append(try await translate(text: block, source: .english, target: .chineseSimplified, model: model))
+        }
+        return result
+    }
+
     func testConnection(model: String) async throws {
         let url = try await availableServer(startManaged: true)
         let available = try await listModels(at: url)

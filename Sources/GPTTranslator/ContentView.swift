@@ -41,6 +41,12 @@ struct ContentView: View {
                 .font(.title2.weight(.semibold))
             Spacer()
             Button {
+                globalController.showPDFReaderWindow()
+            } label: {
+                Label("PDF 全文翻译", systemImage: "book.pages")
+            }
+            .buttonStyle(.borderless)
+            Button {
                 globalController.showSettingsWindow()
             } label: {
                 Label("设置", systemImage: "gearshape")

@@ -190,6 +190,14 @@ struct MenuBarView: View {
 
             Divider()
 
+            Button {
+                runAfterMenuDismissal { globalController.showPDFReaderWindow() }
+            } label: {
+                Label("PDF 全文翻译", systemImage: "book.pages")
+                    .foregroundStyle(menuActionColor)
+            }
+            .buttonStyle(.borderless)
+
             Button("打开主窗口", systemImage: "macwindow") { showMainWindow() }
                 .buttonStyle(.borderless)
                 .foregroundStyle(menuActionColor)

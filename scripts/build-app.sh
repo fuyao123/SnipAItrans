@@ -21,7 +21,7 @@ fi
 binary_path="$(swift build "${build_args[@]}" --show-bin-path)/SnipAItrans"
 applications_dir="${APP_OUTPUT_DIR:-$HOME/Applications}"
 app_path="$applications_dir/SnipAItrans.app"
-app_version="${APP_VERSION:-1.4.0}"
+app_version="${APP_VERSION:-1.5.0}"
 
 mkdir -p "$applications_dir"
 rm -rf "$app_path"
@@ -38,6 +38,19 @@ cat > "$app_path/Contents/Info.plist" <<PLIST
 <dict>
 	<key>CFBundleDisplayName</key>
 	<string>SnipAItrans</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>PDF Document</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array><string>com.adobe.pdf</string></array>
+		</dict>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>SnipAItrans</string>
 	<key>CFBundleIdentifier</key>

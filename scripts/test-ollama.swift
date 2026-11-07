@@ -26,6 +26,17 @@ struct OllamaChecks {
         require(!service.models.contains("remote:latest"), "Cloud model appeared in local list")
         let result = try await service.translate(text: "good morning", source: .english, target: .chineseSimplified, model: "qwen2.5:7b")
         require(result == "早上好", "Local translation failed")
+        OllamaMockProtocol.setStreaming(true)
+        var partials: [String] = []
+        let streamed = try await service.translateStreaming(text: "good morning", source: .english, target: .chineseSimplified, model: "qwen2.5:7b") { partials.append($0) }
+        require(streamed == "早上好" && partials.first == "早上", "Streaming must show partial text and return the complete translation: \(streamed), partials=\(partials)")
+        OllamaMockProtocol.setIncompleteStream(true)
+        do {
+            _ = try await service.translateStreaming(text: "good morning", source: .english, target: .chineseSimplified, model: "qwen2.5:7b") { _ in }
+            fatalError("Incomplete streaming response was accepted as complete")
+        } catch { }
+        OllamaMockProtocol.setIncompleteStream(false)
+        OllamaMockProtocol.setStreaming(false)
         do {
             _ = try await service.translate(text: "test", source: .english, target: .chineseSimplified, model: "remote:latest")
             fatalError("A remote model was accepted as local")
@@ -62,6 +73,14 @@ struct OllamaChecks {
 private final class OllamaMockProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var pulled = false
+    nonisolated(unsafe) private static var incompleteStream = false
+    nonisolated(unsafe) private static var streaming = false
+    static func setIncompleteStream(_ value: Bool) {
+        lock.lock(); incompleteStream = value; lock.unlock()
+    }
+    static func setStreaming(_ value: Bool) {
+        lock.lock(); streaming = value; lock.unlock()
+    }
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
@@ -74,7 +93,13 @@ private final class OllamaMockProtocol: URLProtocol, @unchecked Sendable {
             Self.lock.unlock()
             body = "{\"models\":[{\"name\":\"qwen2.5:7b\"}, {\"name\":\"remote:latest\",\"remote_model\":\"remote\"}\(extra)]}"
         case "/api/chat":
-            body = "{\"message\":{\"content\":\"早上好\"},\"done\":true}"
+            Self.lock.lock(); let isStreaming = Self.streaming; let incomplete = Self.incompleteStream; Self.lock.unlock()
+            if isStreaming {
+                body = "{\"message\":{\"content\":\"早上\"},\"done\":false}\n" +
+                    "{\"message\":{\"content\":\"好\"},\"done\":\(incomplete ? "false" : "true")}\n"
+            } else {
+                body = "{\"message\":{\"content\":\"早上好\"},\"done\":true}"
+            }
         case "/api/pull":
             Self.lock.lock(); Self.pulled = true; Self.lock.unlock()
             body = "{\"status\":\"downloading\",\"total\":100,\"completed\":50}\n{\"status\":\"success\"}\n"

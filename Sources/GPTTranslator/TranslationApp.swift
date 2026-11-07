@@ -1,12 +1,47 @@
+import AppKit
 import SwiftUI
+
+/// Finder can deliver the open-document event before the SwiftUI windows have
+/// connected the controller, so retain those URLs until it is ready.
+@MainActor
+enum PDFOpenRequests {
+    private static weak var controller: GlobalTranslationController?
+    private static var pending: [URL] = []
+
+    static func receive(_ urls: [URL]) {
+        let pdfs = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() == "pdf" }
+        guard let controller else {
+            pending.append(contentsOf: pdfs)
+            return
+        }
+        for url in pdfs { controller.showPDFReaderWindow(opening: url) }
+    }
+
+    static func connect(to controller: GlobalTranslationController) {
+        self.controller = controller
+        let queued = pending
+        pending.removeAll()
+        for url in queued { controller.showPDFReaderWindow(opening: url) }
+    }
+}
+
+@MainActor
+final class TranslationAppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        PDFOpenRequests.receive(urls)
+    }
+}
 
 @main
 struct TranslationApp: App {
+    @NSApplicationDelegateAdaptor(TranslationAppDelegate.self) private var appDelegate
     @StateObject private var viewModel = TranslationViewModel()
     @StateObject private var globalController = GlobalTranslationController()
 
     var body: some Scene {
-        WindowGroup(AppIdentity.name, id: "main") {
+        // The main editor is a single window. WindowGroup creates another
+        // empty main window every time Finder delivers a PDF-open event.
+        Window(AppIdentity.name, id: "main") {
             ContentView()
                 .environmentObject(viewModel)
                 .environmentObject(globalController)
