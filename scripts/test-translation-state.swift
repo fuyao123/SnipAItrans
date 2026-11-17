@@ -30,12 +30,15 @@ struct TranslationStateChecks {
             endpoint: "https://translation-test.invalid/v1/chat/completions",
             model: "mock-model"
         )
-        UserDefaults.standard.register(defaults: [
+        let initialDefaults: [String: Any] = [
             "provider": ModelProvider.customAPI.rawValue,
             "customAPISources": try JSONEncoder().encode([source]),
             "selectedCustomAPIID": source.id.uuidString,
             "floatingSourceIDs": ["custom.\(source.id.uuidString)"]
-        ])
+        ]
+        for (key, value) in initialDefaults { UserDefaults.standard.set(value, forKey: key) }
+        UserDefaults.standard.removeObject(forKey: "selectedAPIModelSourceID")
+        UserDefaults.standard.removeObject(forKey: "apiModelSources")
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [TranslationMockURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -96,8 +99,120 @@ struct TranslationStateChecks {
         require(model.floatingSourceText == "new selection", "Stale request changed floating source")
         require(model.comparisonResults.first?.translatedText == "translated:new selection", "Stale result replaced latest selection")
         require(model.sourceText == "slow main" && model.translatedText == "translated:slow main", "Rapid selections changed main state")
+
+        let localConfiguration = URLSessionConfiguration.ephemeral
+        localConfiguration.protocolClasses = [LocalCompletionMockURLProtocol.self]
+        let localSession = URLSession(configuration: localConfiguration)
+        let localService = OllamaService(session: localSession, managedRoot: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let localModel = TranslationViewModel(ollamaService: localService)
+        localModel.provider = .ollama
+        localModel.modelName = "qwen2.5:7b"
+        localModel.floatingSourceIDs = [ModelProvider.ollama.rawValue]
+        localModel.translateForFloatingWindow("local complete result")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        require(localModel.comparisonResults.first?.isLoading == true && localModel.comparisonResults.first?.translatedText == nil,
+                "Ollama selection must not show partial output while the response is in progress")
+        try await waitUntil({ localModel.comparisonResults.first?.translatedText == "完整译文" }, "Complete Ollama selection result missing")
+        require(localModel.comparisonResults.first?.isLoading == false, "Ollama selection must finish loading")
+        require(LocalCompletionMockURLProtocol.usedNonStreamingRequest(), "Ollama selection must request a complete response")
+
+        // Upgrade from a removed Google Web provider without hiding remaining sources.
+        UserDefaults.standard.set("googleWeb", forKey: "provider")
+        UserDefaults.standard.set(["googleWeb", "ollama"], forKey: "floatingSourceIDs")
+        UserDefaults.standard.set(["googleWeb", "ollama"], forKey: "floatingSourceOrder")
+        let migrated = TranslationViewModel(ollamaService: localService)
+        require(migrated.provider == .ollama, "Removed default should migrate to an enabled source")
+        require(migrated.enabledFloatingSources.map(\.id) == ["ollama"], "Removed source must disappear without affecting Ollama")
+        require(UserDefaults.standard.string(forKey: "provider") == "ollama", "Migrated default must persist")
+        require(!(UserDefaults.standard.stringArray(forKey: "floatingSourceIDs") ?? []).contains("googleWeb"), "Removed source must be removed from saved settings")
+        require(!(UserDefaults.standard.stringArray(forKey: "floatingSourceOrder") ?? []).contains("googleWeb"), "Removed source must be removed from saved order")
+        require(migrated.allTranslationSources.contains(where: { $0.provider == .antigravityOAuth }), "Gemini OAuth must remain available")
+
+        UserDefaults.standard.set("googleWeb", forKey: "provider")
+        UserDefaults.standard.set(["googleWeb"], forKey: "floatingSourceIDs")
+        UserDefaults.standard.set(["googleWeb"], forKey: "floatingSourceOrder")
+        let onlyRemoved = TranslationViewModel(ollamaService: localService)
+        if #available(macOS 15.0, *) {
+            require(onlyRemoved.provider == .appleTranslation, "Only removed source must fall back to Apple translation on supported macOS")
+        } else {
+            require(onlyRemoved.provider == .openAIChatGPT, "Only removed source must have a supported fallback")
+        }
+        require(onlyRemoved.enabledFloatingSources.count == 1, "Removing the last source must retain one fallback")
+
+        UserDefaults.standard.set("googleWeb", forKey: "provider")
+        UserDefaults.standard.set(["obsolete-source"], forKey: "floatingSourceIDs")
+        let invalidFallback = TranslationViewModel(ollamaService: localService)
+        require(invalidFallback.enabledFloatingSources.count == 1, "Removed provider with stale IDs must retain one fallback")
+
+        UserDefaults.standard.set("googleWeb", forKey: "provider")
+        UserDefaults.standard.set(["googleWeb", "custom.\(source.id.uuidString)"], forKey: "floatingSourceIDs")
+        UserDefaults.standard.set(["custom.\(source.id.uuidString)", "googleWeb"], forKey: "floatingSourceOrder")
+        let customFallback = TranslationViewModel(ollamaService: localService)
+        require(customFallback.provider == .customAPI && customFallback.selectedCustomAPIID == source.id,
+                "Removed default must preserve the enabled custom API source")
+        require(customFallback.enabledFloatingSources.map(\.id) == ["custom.\(source.id.uuidString)"], "Custom API source must stay enabled")
+
+        UserDefaults.standard.set("antigravityOAuth", forKey: "provider")
+        UserDefaults.standard.set(["googleWeb", "antigravityOAuth"], forKey: "floatingSourceIDs")
+        UserDefaults.standard.set(["antigravityOAuth", "googleWeb"], forKey: "floatingSourceOrder")
+        let geminiPreserved = TranslationViewModel(ollamaService: localService)
+        require(geminiPreserved.provider == .antigravityOAuth && geminiPreserved.enabledFloatingSources.map(\.id) == ["antigravityOAuth"],
+                "Existing Gemini OAuth selection must remain unchanged")
         print("Translation state checks passed")
     }
+}
+
+private final class LocalCompletionMockURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let stateLock = NSLock()
+    nonisolated(unsafe) private static var nonStreaming = false
+    private let lock = NSLock()
+    private var stopped = false
+
+    static func usedNonStreamingRequest() -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return nonStreaming
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let url = request.url else { return }
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        if url.path == "/api/tags" {
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data("{\"models\":[{\"name\":\"qwen2.5:7b\"}]}".utf8))
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        let body: Data
+        if let data = request.httpBody {
+            body = data
+        } else if let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var bytes = [UInt8](repeating: 0, count: 1024)
+            var data = Data()
+            while stream.hasBytesAvailable {
+                let count = stream.read(&bytes, maxLength: bytes.count)
+                if count <= 0 { break }
+                data.append(bytes, count: count)
+            }
+            body = data
+        } else {
+            body = Data()
+        }
+        let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        Self.stateLock.lock(); Self.nonStreaming = json?["stream"] as? Bool == false; Self.stateLock.unlock()
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("{\"message\":{\"content\":\"".utf8))
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { [self] in
+            lock.lock(); let shouldRespond = !stopped; lock.unlock()
+            guard shouldRespond else { return }
+            client?.urlProtocol(self, didLoad: Data("完整译文\"},\"done\":true}".utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+    override func stopLoading() { lock.lock(); stopped = true; lock.unlock() }
 }
 
 private final class TranslationMockURLProtocol: URLProtocol, @unchecked Sendable {

@@ -1,3 +1,19 @@
+# SnipAItrans 1.5.1
+
+## 本次更新
+
+- 支持在访达快速预览的受支持文档中划词翻译，同时避免把文件列表中的文件名误认为选中文字。
+- 多个 PDF 可在独立窗口中打开，各自保留阅读位置和翻译状态。
+- 翻译结果窗口根据内容调整大小，改善较长译文被遮挡的问题。
+- Ollama 划词译文在生成完成后一次显示。
+- 移除不稳定的 Google 网页翻译源，并迁移相关旧设置；Gemini OAuth 翻译源继续保留。
+
+## 安装
+
+下载 `SnipAItrans-1.5.1-macOS.dmg`，打开后将应用拖入 Applications。安装包适用于 Apple Silicon Mac，应用需要 macOS 13 或更新版本；Apple 离线翻译需要 macOS 15 或更新版本，Ollama 需要 macOS 14 或更新版本。
+
+安装包未使用 Apple Developer ID 公证；首次打开如遇系统提示，可在 Finder 中右键应用并选择“打开”。使用 OpenAI/ChatGPT OAuth 需要自行安装并登录 Codex CLI；使用 Gemini OAuth 需要自行安装并登录 Antigravity CLI。安装包不包含本地大模型或用户的登录信息。
+
 # GPT 翻译助手 1.2.5
 
 1.2.5 将 OpenAI/ChatGPT OAuth 翻译源的默认模型切换到 GPT-6 Luna。

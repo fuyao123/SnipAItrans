@@ -48,6 +48,26 @@ struct PDFReaderChecks {
         let input = temp.appendingPathComponent("synthetic-input.pdf")
         try makeFixture(at: input)
 
+        // Each reader keeps its own page and translations when another PDF opens.
+        let firstReader = PDFTranslationSession(modelName: { "local" }, translate: { text, _ in
+            "第一窗口译文：\(text)"
+        }, prefetchAllPages: false)
+        let secondReader = PDFTranslationSession(modelName: { "local" }, translate: { text, _ in
+            "第二窗口译文：\(text)"
+        }, prefetchAllPages: false)
+        firstReader.open(temp.appendingPathComponent("fixture-text.pdf"))
+        try await wait(firstReader)
+        firstReader.goToPage(1)
+        try await wait(firstReader)
+        let retainedText = firstReader.translatedParts
+        try require(firstReader.pageIndex == 1 && !retainedText.isEmpty, "first reader must have translated page two")
+        secondReader.open(temp.appendingPathComponent("fixture-text.pdf"))
+        try await wait(secondReader)
+        try require(firstReader.pageIndex == 1 && firstReader.translatedParts == retainedText,
+                    "opening another reader must preserve the first reader's page and translation")
+        firstReader.cancel()
+        secondReader.cancel()
+
         let long = String(repeating: "Bevacizumab 项目 😀 word.\n", count: 200)
         let chunks = PDFTranslationText.chunks(long, maximumLength: 80)
         try require(chunks.joined() == long && chunks.allSatisfy { $0.count <= 80 }, "chunk text lost or split incorrectly")

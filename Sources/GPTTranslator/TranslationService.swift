@@ -1025,9 +1025,6 @@ struct DirectProviderService: Sendable {
         apiKey: String,
         customEndpoint: String = ""
     ) async throws -> String {
-        if provider == .googleWeb {
-            return try await translateWithGoogleWeb(text: text, source: source, target: target)
-        }
         guard provider.needsAPIKey else { throw ServiceError.unsupportedProvider }
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ServiceError.missingAPIKey
@@ -1077,42 +1074,6 @@ struct DirectProviderService: Sendable {
             throw ServiceError.emptyResult
         }
         return content
-    }
-
-    private func translateWithGoogleWeb(
-        text: String,
-        source: LanguageOption,
-        target: LanguageOption
-    ) async throws -> String {
-        var components = URLComponents(string: "https://translate.googleapis.com/translate_a/single")
-        components?.queryItems = [
-            URLQueryItem(name: "client", value: "gtx"),
-            URLQueryItem(name: "sl", value: source.googleCode),
-            URLQueryItem(name: "tl", value: target.googleCode),
-            URLQueryItem(name: "dt", value: "t"),
-            URLQueryItem(name: "q", value: text)
-        ]
-        guard let url = components?.url else { throw ServiceError.invalidResponse }
-
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 15
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else { throw ServiceError.invalidResponse }
-        guard (200...299).contains(httpResponse.statusCode) else {
-            if httpResponse.statusCode == 429 {
-                throw ServiceError.api("Google 网页翻译请求过于频繁（HTTP 429），请稍后再试或切换其他翻译源。")
-            }
-            throw ServiceError.api("Google 网页翻译请求失败（HTTP \(httpResponse.statusCode)）。")
-        }
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [Any],
-              let segments = root.first as? [Any] else { throw ServiceError.invalidResponse }
-        let translated = segments.compactMap { segment -> String? in
-            guard let values = segment as? [Any], let value = values.first as? String else { return nil }
-            return value
-        }.joined()
-        guard !translated.isEmpty else { throw ServiceError.emptyResult }
-        return translated
     }
 
 }

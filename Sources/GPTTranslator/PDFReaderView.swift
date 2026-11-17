@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -8,6 +9,7 @@ struct PDFReaderView: View {
     @StateObject private var controls = PDFReaderControls()
     @ObservedObject private var viewModel: TranslationViewModel
     @ObservedObject private var ollama: OllamaService
+    private let openDocument: (URL) -> Void
     @State private var pageText = "1"
     @State private var displayOriginalLayout = true
     @State private var splitFraction: CGFloat = 0.5
@@ -18,10 +20,11 @@ struct PDFReaderView: View {
     @State private var pdfDropError: String?
     @FocusState private var searchHasFocus: Bool
 
-    init(session: PDFTranslationSession, viewModel: TranslationViewModel) {
+    init(session: PDFTranslationSession, viewModel: TranslationViewModel, openDocument: @escaping (URL) -> Void) {
         _session = StateObject(wrappedValue: session)
         _viewModel = ObservedObject(wrappedValue: viewModel)
         _ollama = ObservedObject(wrappedValue: viewModel.ollamaService)
+        self.openDocument = openDocument
     }
 
     var body: some View {
@@ -342,7 +345,7 @@ struct PDFReaderView: View {
         panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        present(panel) { session.open($0) }
+        present(panel, selection: openDocument)
     }
 
     private func acceptPDFDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -364,7 +367,7 @@ struct PDFReaderView: View {
                     return
                 }
                 pdfDropError = nil
-                session.open(url)
+                openDocument(url)
             }
         }
         return true
@@ -384,8 +387,8 @@ struct PDFReaderView: View {
         let completion: (NSApplication.ModalResponse) -> Void = { response in
             AppFilePanelActivity.end()
             guard response == .OK, let url = panel.url else { return }
-            selection(url)
             readerWindow?.makeKeyAndOrderFront(nil)
+            selection(url)
         }
         if let readerWindow {
             panel.beginSheetModal(for: readerWindow, completionHandler: completion)
@@ -400,8 +403,9 @@ final class PDFReaderWindowHost: NSObject, NSWindowDelegate {
     let window: NSWindow
     let session: PDFTranslationSession
     var onClose: (() -> Void)?
+    private var titleObservation: AnyCancellable?
 
-    init(session: PDFTranslationSession, viewModel: TranslationViewModel) {
+    init(session: PDFTranslationSession, viewModel: TranslationViewModel, openDocument: @escaping (URL) -> Void) {
         self.session = session
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
@@ -414,8 +418,11 @@ final class PDFReaderWindowHost: NSObject, NSWindowDelegate {
         window.minSize = NSSize(width: 800, height: 520)
         window.isReleasedWhenClosed = false
         window.center()
-        window.contentViewController = NSHostingController(rootView: PDFReaderView(session: session, viewModel: viewModel))
+        window.contentViewController = NSHostingController(rootView: PDFReaderView(session: session, viewModel: viewModel, openDocument: openDocument))
         window.delegate = self
+        titleObservation = session.$fileName.sink { [weak window] name in
+            window?.title = name.isEmpty ? "PDF 全文翻译" : "\(name) — PDF 全文翻译"
+        }
     }
 
     func windowWillClose(_ notification: Notification) {

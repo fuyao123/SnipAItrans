@@ -57,13 +57,6 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                    } else if viewModel.provider == .googleWeb {
-                        Label("无需账号或 API Key", systemImage: "globe")
-                            .foregroundStyle(.secondary)
-                        Text("使用 Google 网页翻译的非官方公共接口，可能受网络环境或请求频率限制；HTTP 429 时请切换其他翻译源。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     } else if viewModel.provider == .ollama {
                         OllamaSetupSection(service: viewModel.ollamaService, viewModel: viewModel)
                     } else {

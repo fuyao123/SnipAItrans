@@ -154,6 +154,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     private var quickInputWindow: QuickTranslationPanel?
     private var resultWindowAnchor: NSPoint?
     private var resultSizingSubscription: AnyCancellable?
+    private var resultLayout = SelectionResultLayout()
     private var workspaceActivationObserver: NSObjectProtocol?
     private var lastExternalApplicationPID: pid_t?
     private var lastExternalFocusedElement: AXUIElement?
@@ -359,9 +360,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             return
         }
         let host: PDFReaderWindowHost
-        if url == nil, let existing = pdfReaderWindows.last {
-            host = existing
-        } else if url != nil, let empty = pdfReaderWindows.first(where: { $0.session.document == nil && !$0.session.isWorking }) {
+        if let empty = pdfReaderWindows.first(where: { $0.session.document == nil && !$0.session.isWorking }) {
             host = empty
         } else {
             let pdfSources = PDFTranslationSources(viewModel: viewModel)
@@ -371,7 +370,9 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 translateBatch: { texts, source in try await pdfSources.translateBatch(texts, sourceID: source) },
                 availableSources: { pdfSources.options() }
             )
-            let created = PDFReaderWindowHost(session: session, viewModel: viewModel)
+            let created = PDFReaderWindowHost(session: session, viewModel: viewModel) { [weak self] url in
+                self?.showPDFReaderWindow(opening: url)
+            }
             created.onClose = { [weak self, weak created] in
                 guard let created else { return }
                 self?.pdfReaderWindows.removeAll { $0 === created }
@@ -1383,8 +1384,14 @@ final class GlobalTranslationController: NSObject, ObservableObject {
               (showSelectionButton || autoTranslateSelection),
               !isMenuBarLocation(location),
               !isSelectionExcludedInteractionActive() else { return }
-        guard let application = NSWorkspace.shared.frontmostApplication,
-              application.bundleIdentifier != "com.apple.finder" else {
+        guard let application = NSWorkspace.shared.frontmostApplication else {
+            hideFloatingButton()
+            return
+        }
+        // Finder also owns Quick Look. Only permit its preview web content,
+        // never its file list, where copying could translate a filename.
+        let isFinder = application.bundleIdentifier == "com.apple.finder"
+        guard !isFinder || isFinderQuickLookTextLocation(location) else {
             hideFloatingButton()
             return
         }
@@ -1399,7 +1406,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                   NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier,
                   !self.isMenuBarLocation(NSEvent.mouseLocation),
                   !self.isSelectionExcludedInteractionActive(),
-                  let text = await self.selectedTextWithClipboardFallback(allowClipboardFallback: allowClipboardFallback),
+                  let text = await self.selectedTextWithClipboardFallback(allowClipboardFallback: allowClipboardFallback, rejectFileCopy: isFinder),
                   !Task.isCancelled,
                   NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -1421,8 +1428,10 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     // otherwise double-clicking Save can copy and translate a stale selection.
     private func isTextSelectionLocation(_ location: NSPoint) -> Bool {
         guard let application = NSWorkspace.shared.frontmostApplication,
-              application.bundleIdentifier != "com.apple.finder",
               let mainScreen = NSScreen.screens.first else { return false }
+        if application.bundleIdentifier == "com.apple.finder" {
+            return isFinderQuickLookTextLocation(location)
+        }
         var hit: AXUIElement?
         let result = AXUIElementCopyElementAtPosition(
             AXUIElementCreateSystemWide(), Float(location.x), Float(mainScreen.frame.maxY - location.y), &hit
@@ -1463,6 +1472,35 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             ? (isExplicitTextArea || wpsDocumentSplitCount >= 2) : isText
         logger.debug("double-click selection allowed=\(allowed, privacy: .public) roles=\(roles.joined(separator: ","), privacy: .public)")
         return allowed
+    }
+
+    // Quick Look's document web view exposes an x-apple-ql-* URL. Checking
+    // the hit-test ancestry avoids allowing ordinary Finder rows and controls.
+    private func isFinderQuickLookTextLocation(_ location: NSPoint) -> Bool {
+        guard let mainScreen = NSScreen.screens.first else { return false }
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(
+            AXUIElementCreateSystemWide(), Float(location.x), Float(mainScreen.frame.maxY - location.y), &hit
+        ) == .success else { return false }
+        var element = hit
+        let excluded: Set<String> = ["AXButton", "AXCheckBox", "AXMenu", "AXMenuItem", "AXScrollBar", "AXToolbar"]
+        for _ in 0..<16 {
+            guard let current = element else { break }
+            let role = accessibilityStringAttribute(kAXRoleAttribute as CFString, from: current)
+            if let role, excluded.contains(role) { return false }
+            if role == "AXWebArea" {
+                var rawURL: CFTypeRef?
+                if AXUIElementCopyAttributeValue(current, "AXURL" as CFString, &rawURL) == .success {
+                    let url = (rawURL as? URL)?.absoluteString ?? (rawURL as? String) ?? ""
+                    if url.hasPrefix("x-apple-ql-") { return true }
+                }
+            }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            element = unsafeDowncast(parent, to: AXUIElement.self)
+        }
+        return false
     }
 
     private func isMenuBarLocation(_ location: NSPoint) -> Bool {
@@ -1602,6 +1640,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     private func showResultWindow(at location: NSPoint) {
         guard let viewModel else { return }
         resultWindowAnchor = location
+        resultLayout = SelectionResultLayout()
         let size = desiredResultWindowSize()
         let panel: NSPanel
         if let resultWindow {
@@ -1660,7 +1699,17 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         let top = min(panel.frame.maxY, visible.maxY - 8)
         let x = min(max(panel.frame.minX, visible.minX + 8), visible.maxX - size.width - 8)
         let y = max(visible.minY + 8, top - size.height)
-        panel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: true, animate: true)
+        guard abs(panel.frame.width - size.width) > 0.5 || abs(panel.frame.height - size.height) > 0.5 else { return }
+        panel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: true)
+    }
+
+    fileprivate func updateResultLayout(_ layout: SelectionResultLayout) {
+        guard layout.headerHeight > 0, layout.contentWidth > 0, layout.contentHeight > 0,
+              layout != resultLayout else { return }
+        resultLayout = layout
+        // Geometry preferences are delivered during a SwiftUI update; resize on the
+        // next run-loop turn so the hosting view can complete its current layout.
+        DispatchQueue.main.async { [weak self] in self?.resizeResultWindowToFit() }
     }
 
     private func desiredResultWindowSize() -> NSSize {
@@ -1674,11 +1723,11 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             .max() ?? 280
         let width = min(max(longestLineWidth + 88, 390), 560)
         let textWidth = width - 56
-        let sourceHeight = min(measuredTextHeight(
+        let sourceHeight = measuredTextHeight(
             viewModel.floatingErrorMessage ?? viewModel.floatingSourceText,
-            width: textWidth,
+            width: max(textWidth - 70, 1),
             font: .systemFont(ofSize: 11)
-        ), 160)
+        )
         let resultsHeight = viewModel.comparisonResults.reduce(CGFloat.zero) { total, result in
             let contentHeight: CGFloat
             if result.isLoading && result.translatedText == nil {
@@ -1690,8 +1739,16 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             return total + 54 + max(contentHeight, 18)
         }
         let gaps = CGFloat(max(viewModel.comparisonResults.count - 1, 0)) * 10
-        let naturalHeight = 91 + sourceHeight + resultsHeight + gaps
-        let screenLimit = (NSScreen.main?.visibleFrame.height ?? 900) * 0.72
+        let estimatedHeight = 115 + sourceHeight + resultsHeight + gaps
+        let titleBarHeight = resultWindow.map { $0.frame.height - ($0.contentView?.frame.height ?? $0.frame.height) } ?? 28
+        // A permanently visible macOS scrollbar may consume part of the width.
+        let matchesWidth = abs(resultLayout.contentWidth - (width - 32)) < 24
+        let measuredHeight = resultLayout.headerHeight + resultLayout.contentHeight + 44 + titleBarHeight
+        let naturalHeight = matchesWidth && resultLayout.headerHeight > 0 && resultLayout.contentHeight > 0
+            ? max(measuredHeight, 155) : estimatedHeight
+        let anchor = resultWindowAnchor ?? NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(anchor) }) ?? NSScreen.main
+        let screenLimit = (screen?.visibleFrame.height ?? 900) * 0.8
         return NSSize(width: width, height: min(max(naturalHeight, 155), screenLimit))
     }
 
@@ -1735,7 +1792,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         return selected
     }
 
-    private func selectedTextWithClipboardFallback(allowClipboardFallback: Bool = true) async -> String? {
+    private func selectedTextWithClipboardFallback(allowClipboardFallback: Bool = true, rejectFileCopy: Bool = false) async -> String? {
         if let text = selectedText(), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return text
         }
@@ -1764,7 +1821,10 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         for _ in 0..<8 where pasteboard.changeCount == previousChangeCount {
             try? await Task.sleep(nanoseconds: 40_000_000)
         }
-        let copiedText = pasteboard.changeCount != previousChangeCount
+        let containsFile = (pasteboard.pasteboardItems ?? []).contains { item in
+            item.types.contains(.fileURL) || item.types.contains(NSPasteboard.PasteboardType("NSFilenamesPboardType"))
+        }
+        let copiedText = pasteboard.changeCount != previousChangeCount && !(rejectFileCopy && containsFile)
             ? pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
             : nil
         restorePasteboard(savedItems, to: pasteboard)
@@ -2007,6 +2067,23 @@ private struct ScreenshotOCRStatusHUD: View {
     }
 }
 
+fileprivate struct SelectionResultLayout: Equatable {
+    var headerHeight: CGFloat = 0
+    var contentWidth: CGFloat = 0
+    var contentHeight: CGFloat = 0
+}
+
+private struct SelectionResultLayoutPreference: PreferenceKey {
+    static let defaultValue = SelectionResultLayout()
+
+    static func reduce(value: inout SelectionResultLayout, nextValue: () -> SelectionResultLayout) {
+        let next = nextValue()
+        if next.headerHeight > 0 { value.headerHeight = next.headerHeight }
+        if next.contentWidth > 0 { value.contentWidth = next.contentWidth }
+        if next.contentHeight > 0 { value.contentHeight = next.contentHeight }
+    }
+}
+
 private struct SelectionTranslationView: View {
     @ObservedObject var viewModel: TranslationViewModel
     @ObservedObject var controller: GlobalTranslationController
@@ -2029,9 +2106,15 @@ private struct SelectionTranslationView: View {
                 .foregroundStyle(controller.isResultWindowPinned ? Color.accentColor : Color.secondary)
                 .help(controller.isResultWindowPinned ? "取消钉住；失焦后自动隐藏" : "钉住结果窗口")
             }
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: SelectionResultLayoutPreference.self,
+                                           value: SelectionResultLayout(headerHeight: geometry.size.height))
+                }
+            }
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 10) {
                     if let error = viewModel.floatingErrorMessage {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
@@ -2111,6 +2194,15 @@ private struct SelectionTranslationView: View {
                         )
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(key: SelectionResultLayoutPreference.self,
+                                               value: SelectionResultLayout(contentWidth: geometry.size.width,
+                                                                            contentHeight: geometry.size.height))
+                    }
+                }
                 .onDrop(of: [UTType.text], isTargeted: nil) { _ in
                     guard let draggedSourceID else { return false }
                     viewModel.moveComparisonProviderToEnd(draggedSourceID)
@@ -2122,6 +2214,9 @@ private struct SelectionTranslationView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onPreferenceChange(SelectionResultLayoutPreference.self) { layout in
+            controller.updateResultLayout(layout)
+        }
         .overlay(alignment: .topLeading) {
             AppleTranslationBridgeHost(service: viewModel.appleService)
         }

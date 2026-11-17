@@ -4,7 +4,6 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
     case openAIChatGPT
     case antigravityOAuth
     case appleTranslation
-    case googleWeb
     case ollama
     case deepSeek
     case zhipu
@@ -22,7 +21,6 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .openAIChatGPT: return "OpenAI / ChatGPT OAuth"
         case .antigravityOAuth: return "Gemini / Google OAuth（Antigravity）"
         case .appleTranslation: return "Apple 离线翻译"
-        case .googleWeb: return "Google 网页翻译（非官方）"
         case .ollama: return "Ollama 本地大模型"
         case .deepSeek: return "DeepSeek"
         case .zhipu: return "智谱 GLM"
@@ -35,7 +33,6 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .openAIChatGPT: return "OpenAI"
         case .antigravityOAuth: return "Gemini OAuth"
         case .appleTranslation: return "Apple 离线"
-        case .googleWeb: return "Google 网页"
         case .ollama: return "Ollama 本地"
         case .deepSeek: return "DeepSeek"
         case .zhipu: return "智谱"
@@ -45,7 +42,7 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var endpoint: URL? {
         switch self {
-        case .openAIChatGPT, .antigravityOAuth, .appleTranslation, .googleWeb, .ollama, .customAPI: return nil
+        case .openAIChatGPT, .antigravityOAuth, .appleTranslation, .ollama, .customAPI: return nil
         case .deepSeek: return URL(string: "https://api.deepseek.com/chat/completions")
         case .zhipu: return URL(string: "https://open.bigmodel.cn/api/paas/v4/chat/completions")
         }
@@ -53,14 +50,14 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var needsAPIKey: Bool {
         switch self {
-        case .openAIChatGPT, .antigravityOAuth, .appleTranslation, .googleWeb, .ollama: return false
+        case .openAIChatGPT, .antigravityOAuth, .appleTranslation, .ollama: return false
         default: return true
         }
     }
 
     var isMachineTranslation: Bool {
         switch self {
-        case .appleTranslation, .googleWeb: return true
+        case .appleTranslation: return true
         default: return false
         }
     }
@@ -74,8 +71,6 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .antigravityOAuth:
             return [Self.antigravityFastModel]
         case .appleTranslation:
-            return []
-        case .googleWeb:
             return []
         case .ollama:
             return ["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:1.5b"]
@@ -93,7 +88,6 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .openAIChatGPT: return Self.openAIDefaultModel
         case .antigravityOAuth: return Self.antigravityFastModel
         case .appleTranslation: return ""
-        case .googleWeb: return ""
         case .ollama: return "qwen2.5:7b"
         case .deepSeek: return "deepseek-flash"
         case .zhipu: return "glm-5.3-flash"

@@ -216,9 +216,7 @@ final class TranslationViewModel: ObservableObject {
         self.ollamaService = ollamaService
         self.keychain = keychain
 
-        let storedProvider = UserDefaults.standard.string(forKey: "provider")
-            .flatMap(ModelProvider.init(rawValue:)) ?? .openAIChatGPT
-        self.provider = storedProvider
+        let previousProvider = UserDefaults.standard.string(forKey: "provider")
         let decodedCustomSources = UserDefaults.standard.data(forKey: "customAPISources")
             .flatMap { try? JSONDecoder().decode([CustomAPISource].self, from: $0) } ?? []
         let legacyEndpoint = UserDefaults.standard.string(forKey: "customAPIEndpoint") ?? ""
@@ -228,10 +226,7 @@ final class TranslationViewModel: ObservableObject {
             : decodedCustomSources
         self.customAPISources = initialCustomSources
         let savedCustomID = UserDefaults.standard.string(forKey: "selectedCustomAPIID").flatMap(UUID.init(uuidString:))
-        let initialCustom = initialCustomSources.first(where: { $0.id == savedCustomID }) ?? initialCustomSources[0]
-        self.selectedCustomAPIID = initialCustom.id
-        self.customAPIDisplayName = initialCustom.displayName
-        self.customAPIEndpoint = initialCustom.endpoint
+        let previousCustom = initialCustomSources.first(where: { $0.id == savedCustomID }) ?? initialCustomSources[0]
         let savedAPIModels = UserDefaults.standard.data(forKey: "apiModelSources")
             .flatMap { try? JSONDecoder().decode([APIModelSource].self, from: $0) } ?? []
         let initialAPIModels = savedAPIModels.filter { source in
@@ -239,9 +234,38 @@ final class TranslationViewModel: ObservableObject {
                 (source.provider != .customAPI || initialCustomSources.contains { $0.id == source.customAPIID })
         }
         self.apiModelSources = initialAPIModels
+        let previousCustomID = Self.customSourceID(previousCustom.id)
+        let savedIDs = UserDefaults.standard.stringArray(forKey: "floatingSourceIDs")
+            ?? (UserDefaults.standard.stringArray(forKey: "floatingProviders") ?? []).map { $0 == ModelProvider.customAPI.rawValue ? previousCustomID : $0 }
+        let savedOrder = UserDefaults.standard.stringArray(forKey: "floatingSourceOrder")
+            ?? (UserDefaults.standard.stringArray(forKey: "floatingProviderOrder") ?? []).map { $0 == ModelProvider.customAPI.rawValue ? previousCustomID : $0 }
+        let allIDs = ModelProvider.allCases.filter { $0 != .customAPI }.map(\.rawValue)
+            + initialCustomSources.map { Self.customSourceID($0.id) }
+            + initialAPIModels.map(\.sourceID)
+        let fallbackID = (savedOrder + savedIDs).first { savedIDs.contains($0) && allIDs.contains($0) }
+        let fallbackModel = initialAPIModels.first { $0.sourceID == fallbackID }
+        let platformFallback: ModelProvider
+        if #available(macOS 15.0, *) { platformFallback = .appleTranslation }
+        else { platformFallback = .openAIChatGPT }
+        let fallbackProvider = fallbackModel?.provider
+            ?? (fallbackID?.hasPrefix("custom.") == true ? .customAPI : fallbackID.flatMap(ModelProvider.init(rawValue:)))
+            ?? platformFallback
+        let storedProvider = previousProvider == "googleWeb"
+            ? fallbackProvider : (previousProvider.flatMap(ModelProvider.init(rawValue:)) ?? .openAIChatGPT)
+        self.provider = storedProvider
+        let fallbackCustomID = fallbackModel?.customAPIID ?? fallbackID.flatMap { id in
+            id.hasPrefix("custom.") ? UUID(uuidString: String(id.dropFirst("custom.".count))) : nil
+        }
+        let initialCustom = previousProvider == "googleWeb"
+            ? (initialCustomSources.first(where: { $0.id == fallbackCustomID }) ?? previousCustom)
+            : previousCustom
+        self.selectedCustomAPIID = initialCustom.id
+        self.customAPIDisplayName = initialCustom.displayName
+        self.customAPIEndpoint = initialCustom.endpoint
         let savedAPIModelID = UserDefaults.standard.string(forKey: "selectedAPIModelSourceID").flatMap(UUID.init(uuidString:))
+        let effectiveAPIModelID = previousProvider == "googleWeb" ? fallbackModel?.id : savedAPIModelID
         let initialAPIModel = initialAPIModels.first {
-            $0.id == savedAPIModelID && $0.provider == storedProvider &&
+            $0.id == effectiveAPIModelID && $0.provider == storedProvider &&
                 ($0.provider != .customAPI || $0.customAPIID == initialCustom.id)
         }
         self.selectedAPIModelSourceID = initialAPIModel?.id
@@ -263,15 +287,28 @@ final class TranslationViewModel: ObservableObject {
         self.translateEnglishSelectionToChinese = UserDefaults.standard.object(forKey: "translateEnglishSelectionToChinese") as? Bool ?? true
         self.resultFontSize = CGFloat(UserDefaults.standard.object(forKey: "resultFontSize") as? Double ?? 14)
         let customID = Self.customSourceID(initialCustom.id)
-        let savedIDs = UserDefaults.standard.stringArray(forKey: "floatingSourceIDs")
-            ?? (UserDefaults.standard.stringArray(forKey: "floatingProviders") ?? []).map { $0 == ModelProvider.customAPI.rawValue ? customID : $0 }
-        self.floatingSourceIDs = savedIDs.isEmpty ? [ModelProvider.openAIChatGPT.rawValue, customID] : Set(savedIDs)
-        let savedOrder = UserDefaults.standard.stringArray(forKey: "floatingSourceOrder")
-            ?? (UserDefaults.standard.stringArray(forKey: "floatingProviderOrder") ?? []).map { $0 == ModelProvider.customAPI.rawValue ? customID : $0 }
-        let allIDs = ModelProvider.allCases.filter { $0 != .customAPI }.map(\.rawValue)
-            + initialCustomSources.map { Self.customSourceID($0.id) }
-            + initialAPIModels.map(\.sourceID)
-        self.floatingSourceOrder = Self.normalizedSourceOrder(savedOrder, allIDs: allIDs)
+        let fallbackActiveID = initialAPIModel?.sourceID ?? (storedProvider == .customAPI ? customID : storedProvider.rawValue)
+        let validSavedIDs = savedIDs.filter { allIDs.contains($0) }
+        let migratedIDs: Set<String>
+        if savedIDs.contains("googleWeb") || previousProvider == "googleWeb" {
+            migratedIDs = validSavedIDs.isEmpty ? [fallbackActiveID] : Set(validSavedIDs)
+        } else {
+            migratedIDs = savedIDs.isEmpty ? [ModelProvider.openAIChatGPT.rawValue, customID] : Set(savedIDs)
+        }
+        self.floatingSourceIDs = migratedIDs
+        let normalizedOrder = Self.normalizedSourceOrder(savedOrder, allIDs: allIDs)
+        self.floatingSourceOrder = normalizedOrder
+        if previousProvider == "googleWeb" {
+            UserDefaults.standard.set(storedProvider.rawValue, forKey: "provider")
+            UserDefaults.standard.set(initialCustom.id.uuidString, forKey: "selectedCustomAPIID")
+            UserDefaults.standard.set(initialAPIModel?.id.uuidString, forKey: "selectedAPIModelSourceID")
+        }
+        if savedIDs.contains("googleWeb") || previousProvider == "googleWeb" {
+            UserDefaults.standard.set(Array(migratedIDs).sorted(), forKey: "floatingSourceIDs")
+        }
+        if savedOrder.contains("googleWeb") {
+            UserDefaults.standard.set(normalizedOrder, forKey: "floatingSourceOrder")
+        }
         // Migrate the OpenAI model even when another provider is currently selected,
         // so switching to OpenAI later uses the new default immediately.
         _ = Self.savedModel(for: .openAIChatGPT)
@@ -289,7 +326,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     var currentAppVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.5.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.5.1"
     }
 
     func checkForUpdates(force: Bool = false) async {
@@ -613,7 +650,7 @@ final class TranslationViewModel: ObservableObject {
     var configuredPDFSources: [TranslationSource] {
         allTranslationSources.filter { source in
             switch source.provider {
-            case .ollama, .appleTranslation, .googleWeb:
+            case .ollama, .appleTranslation:
                 return true
             case .openAIChatGPT:
                 return isLoggedIn || connectionState(for: source) == .connected
@@ -639,8 +676,6 @@ final class TranslationViewModel: ObservableObject {
         case .appleTranslation:
             if #available(macOS 15.0, *) { return true }
             return false
-        case .googleWeb:
-            return true
         case .ollama:
             return ollamaService.models.contains(modelName)
         case .customAPI:
@@ -1063,11 +1098,7 @@ final class TranslationViewModel: ObservableObject {
                         )
                         self.providerConnectionStates[ModelProvider.appleTranslation.rawValue] = .connected
                     } else if selectedProvider == .ollama {
-                        result = try await ollamaService.translateStreaming(text: text, source: source, target: target, model: model) { [weak self] partial in
-                            guard !Task.isCancelled, let self, self.floatingSourceText == text,
-                                  let index = self.comparisonResults.firstIndex(where: { $0.source.id == translationSource.id }) else { return }
-                            self.comparisonResults[index].translatedText = partial
-                        }
+                        result = try await ollamaService.translate(text: text, source: source, target: target, model: model)
                     } else {
                         result = try await directService.translate(
                             text: text,
