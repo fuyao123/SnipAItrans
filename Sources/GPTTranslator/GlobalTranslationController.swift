@@ -2120,21 +2120,24 @@ private struct SelectionTranslationView: View {
                             .foregroundStyle(.red)
                             .font(.caption)
                     } else {
-                        HStack(alignment: .top, spacing: 10) {
-                            Text(viewModel.floatingSourceText)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(alignment: .top, spacing: 10) {
+                                Text(viewModel.floatingSourceText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
 
-                            Button("复制", systemImage: "doc.on.doc") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(viewModel.floatingSourceText, forType: .string)
+                                Button("复制", systemImage: "doc.on.doc") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(viewModel.floatingSourceText, forType: .string)
+                                }
+                                .buttonStyle(.borderless)
+                                .fixedSize()
+                                .help("复制识别或选中的原文")
                             }
-                            .buttonStyle(.borderless)
-                            .fixedSize()
-                            .help("复制识别或选中的原文")
+                            EnglishWordPronunciationView(text: viewModel.floatingSourceText, language: viewModel.sourceLanguage)
                         }
                         .padding(.horizontal, 12)
                     }

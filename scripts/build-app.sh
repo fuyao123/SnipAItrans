@@ -21,7 +21,7 @@ fi
 binary_path="$(swift build "${build_args[@]}" --show-bin-path)/SnipAItrans"
 applications_dir="${APP_OUTPUT_DIR:-$HOME/Applications}"
 app_path="$applications_dir/SnipAItrans.app"
-app_version="${APP_VERSION:-1.5.1}"
+app_version="${APP_VERSION:-1.5.2}"
 
 mkdir -p "$applications_dir"
 rm -rf "$app_path"
@@ -29,6 +29,7 @@ mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$binary_path" "$app_path/Contents/MacOS/SnipAItrans"
 cp "$project_dir/Assets/AppIcon.icns" "$app_path/Contents/Resources/AppIcon.icns"
 cp "$project_dir/Assets/MenuBarIcon.png" "$app_path/Contents/Resources/MenuBarIcon.png"
+cp "$project_dir"/Sources/GPTTranslator/Resources/AmericanEnglishIPA*.txt "$app_path/Contents/Resources/"
 cp "$project_dir/THIRD_PARTY_NOTICES.md" "$app_path/Contents/Resources/THIRD_PARTY_NOTICES.md"
 
 cat > "$app_path/Contents/Info.plist" <<PLIST

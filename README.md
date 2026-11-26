@@ -10,12 +10,13 @@ SnipAItrans 原名“GPT 翻译助手”，从 1.3.0 开始使用新名称。
 
 ## 功能
 
-- 菜单栏翻译图标
+- 菜单栏双层对话图标
 - 主窗口可直接切换翻译源和模型；OAuth 及支持模型列表接口的 API 源可读取并刷新模型列表
 - 主窗口可通过滑块调整推理强度，提供所选模型支持的档位
 - 自动识别原文语言，支持中文、英语、日语、韩语、西班牙语、法语和德语
 - 按 `⌘⇧F` 启用或关闭划词翻译，避免与浏览器恢复关闭标签页的快捷键冲突
 - 划词翻译默认在选中文字后直接翻译；也可切换为显示翻译图标，将鼠标移到图标上即可翻译
+- 划词弹窗和主窗口支持英文单词的离线美式音标与发音。查询单个单词后，点击音标旁的喇叭即可用 macOS 系统语音朗读
 - 按 `⌘⇧S` 截图，拖动选择区域后用 macOS Vision OCR，再翻译识别结果
 - 按 `⌘⇧A` 普通截图，使用微信式紧凑工具栏进行画笔、形状、箭头、文字、自由涂抹马赛克、置顶、复制和保存
 - 按 `⌘⇧O` 截图 OCR，只识别选区文字并复制到剪贴板，不进行翻译
@@ -86,7 +87,7 @@ PDF 的文本提取和扫描页 OCR 在本机进行。选择 Ollama 或 Apple �
 
 ## DMG 安装
 
-从 [GitHub Releases](https://github.com/fuyao123/SnipAItrans/releases) 下载 `SnipAItrans-1.5.1-macOS.dmg`，打开后将 `SnipAItrans` 拖入 Applications。当前公开构建未使用 Apple Developer ID 公证；macOS 首次打开时可能需要在 Finder 中右键应用并选择“打开”。
+从 [GitHub Releases](https://github.com/fuyao123/SnipAItrans/releases) 下载 `SnipAItrans-1.5.2-macOS.dmg`，打开后将 `SnipAItrans` 拖入 Applications。当前公开构建未使用 Apple Developer ID 公证；macOS 首次打开时可能需要在 Finder 中右键应用并选择“打开”。
 
 从 1.2.6 或更早版本升级时，请先退出旧版并手动下载新版：仓库更名后，旧版的自动更新检查可能无法识别新地址。新版沿用原来的应用标识和钥匙串服务，以保留设置和凭据；如系统要求重新授权，请在系统设置或应用设置中完成授权。
 

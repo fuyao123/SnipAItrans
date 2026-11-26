@@ -12,6 +12,8 @@ struct ContentView: View {
             header
             Divider()
             languageBar
+            EnglishWordPronunciationView(text: viewModel.sourceText, language: viewModel.sourceLanguage)
+                .padding(.horizontal, 24)
             editorArea
             footer
         }

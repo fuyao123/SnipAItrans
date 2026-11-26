@@ -12,7 +12,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "GPTTranslator",
-            path: "Sources/GPTTranslator"
+            path: "Sources/GPTTranslator",
+            resources: [.copy("Resources/AmericanEnglishIPA.txt"), .copy("Resources/AmericanEnglishIPA-License.txt")]
         )
     ]
 )
